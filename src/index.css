@@ -1,0 +1,141 @@
+@import 'tailwindcss';
+
+/* ---------------------------------------------------------------------------
+   Design tokens — the scholarly-green identity shared with the blueprint.
+   Light palette on :root; dark palette via system preference and .dark class.
+--------------------------------------------------------------------------- */
+:root {
+  --background: #f4f6f3;
+  --surface: #ffffff;
+  --surface-2: #eceff0a0;
+  --muted-surface: #eceef0;
+  --foreground: #16202a;
+  --muted: #586168;
+  --faint: #8a938b;
+  --border: #d5ddd3;
+  --border-strong: #c2ccbf;
+  --primary: #1e5a43;
+  --primary-hover: #184c38;
+  --primary-foreground: #ffffff;
+  --accent-gold: #9c6f29;
+  --ring: #1e5a43;
+  --danger: #ae3a2b;
+  --success: #2e7d52;
+  --warning: #9a6712;
+  --radius: 0.625rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --background: #0f1511;
+    --surface: #161d18;
+    --surface-2: #1b231d;
+    --muted-surface: #1b231d;
+    --foreground: #e8ede5;
+    --muted: #9da89e;
+    --faint: #6e7a70;
+    --border: #2a332c;
+    --border-strong: #39453b;
+    --primary: #2f8159;
+    --primary-hover: #37946a;
+    --primary-foreground: #ffffff;
+    --accent-gold: #cba253;
+    --ring: #5fb089;
+    --danger: #d9715f;
+    --success: #5bb684;
+    --warning: #c79a46;
+  }
+}
+
+.dark {
+  --background: #0f1511;
+  --surface: #161d18;
+  --surface-2: #1b231d;
+  --muted-surface: #1b231d;
+  --foreground: #e8ede5;
+  --muted: #9da89e;
+  --faint: #6e7a70;
+  --border: #2a332c;
+  --border-strong: #39453b;
+  --primary: #2f8159;
+  --primary-hover: #37946a;
+  --primary-foreground: #ffffff;
+  --accent-gold: #cba253;
+  --ring: #5fb089;
+  --danger: #d9715f;
+  --success: #5bb684;
+  --warning: #c79a46;
+}
+
+/* Expose tokens to Tailwind utilities (bg-surface, text-foreground, etc.) */
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-muted-surface: var(--muted-surface);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-gold: var(--accent-gold);
+  --color-ring: var(--ring);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --font-serif: 'Spectral', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+
+  --radius-md: var(--radius);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  border-color: var(--border);
+}
+
+/* Print: show only the report sheet, on white. */
+@media print {
+  body {
+    background: #fff;
+  }
+  .no-print {
+    display: none !important;
+  }
+  body * {
+    visibility: hidden;
+  }
+  .report-sheet,
+  .report-sheet * {
+    visibility: visible;
+  }
+  .report-sheet {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    width: 100%;
+    box-shadow: none !important;
+  }
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+}

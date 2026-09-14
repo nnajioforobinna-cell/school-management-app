@@ -1,0 +1,12 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" fill="#1E5A43"/>
+  <!-- graduation cap: board -->
+  <path d="M256 150 L400 205 L256 260 L112 205 Z" fill="#ffffff"/>
+  <!-- cap under the board -->
+  <path d="M176 224 L176 292 Q256 334 336 292 L336 224 L256 255 Z" fill="#ffffff" opacity="0.92"/>
+  <!-- button -->
+  <circle cx="256" cy="205" r="12" fill="#1E5A43"/>
+  <!-- tassel cord + knob -->
+  <path d="M400 205 L400 300" stroke="#ffffff" stroke-width="9" stroke-linecap="round"/>
+  <circle cx="400" cy="314" r="14" fill="#E8B23A"/>
+</svg>
