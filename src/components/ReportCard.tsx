@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Printer } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
@@ -6,6 +6,7 @@ import { useSchool } from '@/providers/SchoolProvider'
 import type { SchoolRow } from '@/types/database'
 import { DEFAULT_BANDS, ordinal } from '@/lib/grading'
 import { formatDate } from '@/lib/utils'
+import { printNode } from '@/lib/print'
 import type { StudentResult } from '@/lib/results'
 import { Button } from '@/components/ui/button'
 
@@ -34,6 +35,7 @@ export function ReportCard({
 }: Props) {
   const { activeRole } = useSchool()
   const qc = useQueryClient()
+  const sheetRef = useRef<HTMLDivElement>(null)
   const canManage = activeRole === 'owner' || activeRole === 'admin' || activeRole === 'teacher'
 
   const { data: attendance } = useQuery({
@@ -127,13 +129,14 @@ export function ReportCard({
             )}
           </>
         )}
-        <Button className="ml-auto" onClick={() => window.print()}>
+        <Button className="ml-auto" onClick={() => sheetRef.current && printNode(sheetRef.current, 'Report Card')}>
           <Printer className="h-4 w-4" /> Print / Save PDF
         </Button>
       </div>
 
       {/* The sheet */}
       <div
+        ref={sheetRef}
         className="report-sheet mx-auto max-w-[820px] border-t-4 bg-white p-8 text-[#1a2430] shadow-sm"
         style={{ borderTopColor: '#1e5a43' }}
       >
