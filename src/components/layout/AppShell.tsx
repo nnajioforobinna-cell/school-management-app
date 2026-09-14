@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { NotificationBell } from '@/components/NotificationBell'
 import { SyncStatus } from '@/components/SyncStatus'
+import { ThemeToggle } from '@/components/ThemeToggle'
 
 const ROLE_LABEL: Record<string, string> = {
   owner: 'Owner',
@@ -116,6 +117,7 @@ export function AppShell() {
           <span className="font-serif font-semibold md:hidden">{activeSchool?.name ?? 'School Platform'}</span>
           <div className="ml-auto flex items-center gap-2">
             <SyncStatus />
+            <ThemeToggle />
             <NotificationBell />
           </div>
         </header>
