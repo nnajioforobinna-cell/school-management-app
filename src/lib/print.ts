@@ -166,22 +166,14 @@ async function shareAsPdf(build: (root: HTMLElement) => void, filename: string, 
 
   const root = document.createElement('div')
   root.id = 'pdf-root'
-  root.style.cssText = 'position:fixed; left:0; top:0; width:794px; background:#fff; z-index:-1; opacity:0; pointer-events:none;'
+  // Off-screen but fully opaque — html2canvas copies opacity/visibility into its
+  // render, so a hidden (opacity:0/visibility:hidden) container yields a blank PDF.
+  root.style.cssText = 'position:fixed; left:-10000px; top:0; width:794px; background:#ffffff;'
   build(root)
   document.body.appendChild(root)
 
   try {
-    const html2pdf = (await import('html2pdf.js')).default
-    const blob: Blob = await html2pdf()
-      .set({
-        margin: [8, 8, 8, 8],
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-        pagebreak: { mode: ['css', 'legacy'] },
-      })
-      .from(root)
-      .outputPdf('blob')
+    const blob = await elementToPdfBlob(root)
 
     const file = new File([blob], `${filename}.pdf`, { type: 'application/pdf' })
     try {
@@ -200,6 +192,39 @@ async function shareAsPdf(build: (root: HTMLElement) => void, filename: string, 
     root.remove()
     style.remove()
   }
+}
+
+/**
+ * Render a DOM element to a multi-page A4 PDF using html2canvas + jsPDF
+ * directly. (html2pdf.js's own jsPDF glue produced blank pages in this bundle.)
+ */
+async function elementToPdfBlob(root: HTMLElement): Promise<Blob> {
+  const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
+    import('html2canvas'),
+    import('jspdf'),
+  ])
+  const canvas = await html2canvas(root, { scale: 2, backgroundColor: '#ffffff', useCORS: true })
+  const imgData = canvas.toDataURL('image/jpeg', 0.95)
+
+  const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' })
+  const pageW = pdf.internal.pageSize.getWidth()
+  const pageH = pdf.internal.pageSize.getHeight()
+  const margin = 8
+  const usableW = pageW - margin * 2
+  const usableH = pageH - margin * 2
+  const imgH = (canvas.height * usableW) / canvas.width // full image height in mm
+
+  let heightLeft = imgH
+  let position = margin
+  pdf.addImage(imgData, 'JPEG', margin, position, usableW, imgH)
+  heightLeft -= usableH
+  while (heightLeft > 0) {
+    pdf.addPage()
+    position = margin - (imgH - heightLeft) // shift the tall image up for the next slice
+    pdf.addImage(imgData, 'JPEG', margin, position, usableW, imgH)
+    heightLeft -= usableH
+  }
+  return pdf.output('blob')
 }
 
 function downloadBlob(blob: Blob, filename: string) {
