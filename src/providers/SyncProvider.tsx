@@ -1,7 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { supabase } from '@/lib/supabase'
+import { queryClient } from '@/lib/queryClient'
 import { uploadReceipt } from '@/lib/storage'
 import {
+  count as outboxCount,
   enqueue,
   enqueueReceipt,
   flushOutbox,
@@ -51,45 +53,76 @@ export function SyncProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const syncNow = useCallback(async () => {
-    if (syncingRef.current || !navigator.onLine) return
+    if (syncingRef.current) return
     syncingRef.current = true
     setSyncing(true)
+    let before = 0
     try {
+      before = await outboxCount()
       await flushOutbox()
     } finally {
+      const after = await outboxCount()
       await refreshPending()
       setSyncing(false)
       syncingRef.current = false
+      // If anything actually synced, refetch so the freshly-synced data appears.
+      if (after < before) queryClient.invalidateQueries()
     }
   }, [refreshPending])
 
-  // Track connectivity and flush whenever we come back online.
+  // Track connectivity and flush pending writes. navigator.onLine and the
+  // online/offline events are unreliable on iOS, so we don't depend on them
+  // alone: we also flush when the app regains focus/visibility and on a slow
+  // timer while anything is queued.
   useEffect(() => {
     const goOnline = () => {
       setOnline(true)
       void syncNow()
     }
     const goOffline = () => setOnline(false)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        setOnline(navigator.onLine)
+        void syncNow()
+      }
+    }
     window.addEventListener('online', goOnline)
     window.addEventListener('offline', goOffline)
+    window.addEventListener('focus', onVisible)
+    document.addEventListener('visibilitychange', onVisible)
+
+    // Retry loop: while items are queued, keep trying every 20s.
+    const timer = setInterval(async () => {
+      if ((await outboxCount()) > 0) void syncNow()
+    }, 20_000)
+
     void refreshPending()
-    if (navigator.onLine) void syncNow()
+    void syncNow()
     return () => {
       window.removeEventListener('online', goOnline)
       window.removeEventListener('offline', goOffline)
+      window.removeEventListener('focus', onVisible)
+      document.removeEventListener('visibilitychange', onVisible)
+      clearInterval(timer)
     }
   }, [syncNow, refreshPending])
 
   const pushOrQueue = useCallback(
     async (input: QueueInput): Promise<'synced' | 'queued'> => {
+      // navigator.onLine is unreliable on iOS (often stays true with Wi-Fi off),
+      // so we always TRY the write and treat any failure — returned error OR a
+      // thrown network error — as a signal to queue. Never lose the write.
       if (navigator.onLine) {
-        const query = supabase.from(input.table as 'attendance')
-        const { error } = await query.upsert(
-          input.rows as never,
-          input.onConflict ? { onConflict: input.onConflict } : undefined,
-        )
-        if (!error) return 'synced'
-        // fall through: online but the write failed — queue it.
+        try {
+          const query = supabase.from(input.table as 'attendance')
+          const { error } = await query.upsert(
+            input.rows as never,
+            input.onConflict ? { onConflict: input.onConflict } : undefined,
+          )
+          if (!error) return 'synced'
+        } catch {
+          /* network threw — fall through to queue */
+        }
       }
       await enqueue({ table: input.table, rows: input.rows, onConflict: input.onConflict, label: input.label })
       await refreshPending()
@@ -104,30 +137,34 @@ export function SyncProvider({ children }: { children: ReactNode }) {
       const schoolId = String(input.row.school_id)
 
       if (navigator.onLine) {
-        const { error } = await supabase.from('payments').upsert(input.row as never)
-        if (!error) {
-          // Payment landed; try to attach the receipt too.
-          if (input.receipt) {
-            try {
-              const path = await uploadReceipt(schoolId, paymentId, input.receipt)
-              await supabase.from('payments').update({ receipt_image_url: path } as never).eq('id', paymentId)
-            } catch {
-              // Payment is saved but the receipt upload failed — queue just the
-              // receipt so it attaches on the next flush.
-              await enqueueReceipt({
-                paymentId,
-                schoolId,
-                blob: input.receipt,
-                contentType: input.receipt.type,
-                filename: input.receipt.name,
-              })
-              await refreshPending()
-              return 'queued'
+        try {
+          const { error } = await supabase.from('payments').upsert(input.row as never)
+          if (!error) {
+            // Payment landed; try to attach the receipt too.
+            if (input.receipt) {
+              try {
+                const path = await uploadReceipt(schoolId, paymentId, input.receipt)
+                await supabase.from('payments').update({ receipt_image_url: path } as never).eq('id', paymentId)
+              } catch {
+                // Payment is saved but the receipt upload failed — queue just the
+                // receipt so it attaches on the next flush.
+                await enqueueReceipt({
+                  paymentId,
+                  schoolId,
+                  blob: input.receipt,
+                  contentType: input.receipt.type,
+                  filename: input.receipt.name,
+                })
+                await refreshPending()
+                return 'queued'
+              }
             }
+            return 'synced'
           }
-          return 'synced'
+          // fall through: online but the insert returned an error — queue it.
+        } catch {
+          /* network threw — fall through to queue */
         }
-        // fall through: online but the insert failed — queue it.
       }
 
       await enqueue({ table: 'payments', rows: [input.row], label: 'Payment' })

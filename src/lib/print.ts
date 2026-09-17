@@ -203,8 +203,23 @@ async function elementToPdfBlob(root: HTMLElement): Promise<Blob> {
     import('html2canvas'),
     import('jspdf'),
   ])
+
+  // Candidate y-positions (in CSS px, relative to the container top) where a
+  // page may break without cutting through a row or a section.
+  const rect = root.getBoundingClientRect()
+  const breakCss: number[] = []
+  root
+    .querySelectorAll('tr, thead, .doc-header, .doc-title, .doc-sub, .foot, .report-sheet > *')
+    .forEach((el) => {
+      const b = el.getBoundingClientRect().bottom - rect.top
+      if (b > 0) breakCss.push(b)
+    })
+
   const canvas = await html2canvas(root, { scale: 2, backgroundColor: '#ffffff', useCORS: true })
-  const imgData = canvas.toDataURL('image/jpeg', 0.95)
+  const ratio = canvas.height / rect.height // canvas px per CSS px
+  const breaks = Array.from(new Set(breakCss.map((b) => Math.floor(b * ratio))))
+    .filter((b) => b > 0 && b < canvas.height)
+    .sort((a, b) => a - b)
 
   const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' })
   const pageW = pdf.internal.pageSize.getWidth()
@@ -212,18 +227,40 @@ async function elementToPdfBlob(root: HTMLElement): Promise<Blob> {
   const margin = 8
   const usableW = pageW - margin * 2
   const usableH = pageH - margin * 2
-  const imgH = (canvas.height * usableW) / canvas.width // full image height in mm
+  const pxPerMm = canvas.width / usableW
+  const pageHpx = usableH * pxPerMm // one page's worth of content, in canvas px
 
-  let heightLeft = imgH
-  let position = margin
-  pdf.addImage(imgData, 'JPEG', margin, position, usableW, imgH)
-  heightLeft -= usableH
-  while (heightLeft > 0) {
-    pdf.addPage()
-    position = margin - (imgH - heightLeft) // shift the tall image up for the next slice
-    pdf.addImage(imgData, 'JPEG', margin, position, usableW, imgH)
-    heightLeft -= usableH
+  let start = 0
+  let first = true
+  while (start < canvas.height - 1) {
+    const maxEnd = start + pageHpx
+    let end: number
+    if (maxEnd >= canvas.height) {
+      end = canvas.height
+    } else {
+      // Break at the last row/section boundary that fits, but only if it makes
+      // reasonable progress; otherwise hard-cut (a single row taller than a page).
+      const fit = breaks.filter((b) => b > start + pageHpx * 0.4 && b <= maxEnd)
+      end = fit.length ? fit[fit.length - 1] : Math.floor(maxEnd)
+    }
+    const sliceH = Math.max(1, Math.round(end - start))
+
+    const pageCanvas = document.createElement('canvas')
+    pageCanvas.width = canvas.width
+    pageCanvas.height = sliceH
+    const ctx = pageCanvas.getContext('2d')!
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, canvas.width, sliceH)
+    ctx.drawImage(canvas, 0, start, canvas.width, sliceH, 0, 0, canvas.width, sliceH)
+
+    const img = pageCanvas.toDataURL('image/jpeg', 0.95)
+    const sliceHmm = sliceH / pxPerMm
+    if (!first) pdf.addPage()
+    pdf.addImage(img, 'JPEG', margin, margin, usableW, sliceHmm)
+    first = false
+    start = end
   }
+
   return pdf.output('blob')
 }
 

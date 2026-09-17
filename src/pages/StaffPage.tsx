@@ -543,7 +543,7 @@ export function StaffDialog({
         </Field>
 
         <Field label="Date of employment" htmlFor="sf-emp">
-          <DatePicker value={employmentDate} onChange={setEmploymentDate} maxYear={new Date().getFullYear()} minYear={new Date().getFullYear() - 40} />
+          <DatePicker value={employmentDate} onChange={setEmploymentDate} maxYear={new Date().getFullYear()} minYear={1920} />
         </Field>
 
         <div>
