@@ -6,7 +6,6 @@ import { z } from 'zod'
 import { Check, ImageUp, Receipt, X } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useSchool } from '@/providers/SchoolProvider'
-import { uploadSchoolLogo } from '@/lib/storage'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -36,6 +35,40 @@ const profileSchema = z.object({
   website: z.string().optional(),
 })
 type ProfileForm = z.infer<typeof profileSchema>
+
+/**
+ * Resize an image file in the browser and return it as a small PNG data URL.
+ * We store the logo directly on the school row (no Storage bucket), so it works
+ * regardless of storage policies and renders everywhere (sidebar, report cards).
+ */
+function fileToLogoDataUrl(file: File, max = 240): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    const url = URL.createObjectURL(file)
+    img.onload = () => {
+      const scale = Math.min(1, max / Math.max(img.width, img.height))
+      const w = Math.max(1, Math.round(img.width * scale))
+      const h = Math.max(1, Math.round(img.height * scale))
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        URL.revokeObjectURL(url)
+        reject(new Error('Could not process the image.'))
+        return
+      }
+      ctx.drawImage(img, 0, 0, w, h)
+      URL.revokeObjectURL(url)
+      resolve(canvas.toDataURL('image/png'))
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('Could not read that image. Try a PNG or JPG.'))
+    }
+    img.src = url
+  })
+}
 
 export function SettingsPage() {
   const [tab, setTab] = useState<TabId>('profile')
@@ -182,10 +215,10 @@ function BrandingTab() {
     setError(null)
     setUploading(true)
     try {
-      const url = await uploadSchoolLogo(activeSchool.id, file)
-      setLogoUrl(url)
+      const dataUrl = await fileToLogoDataUrl(file)
+      setLogoUrl(dataUrl)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not upload logo.')
+      setError(e instanceof Error ? e.message : 'Could not load logo.')
     } finally {
       setUploading(false)
     }

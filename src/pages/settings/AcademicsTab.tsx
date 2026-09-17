@@ -324,6 +324,8 @@ interface PromoRow {
   studentId: string
   name: string
   fromArmId: string
+  fromLevelId: string
+  fromLevelName: string
   fromLabel: string
   toArmId: string | null
   toLabel: string
@@ -345,6 +347,7 @@ function PromotionDialog({
 }) {
   const [fromId, setFromId] = useState(currentSessionId ?? sessions[0]?.id ?? '')
   const [toId, setToId] = useState('')
+  const [levelFilter, setLevelFilter] = useState('')
   const [makeCurrent, setMakeCurrent] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
@@ -388,6 +391,8 @@ function PromotionDialog({
             studentId: e.student_id as string,
             name: st ? `${st.last_name}, ${st.first_name}` : '',
             fromArmId,
+            fromLevelId: arm?.class_level_id ?? '',
+            fromLevelName: arm ? (levelById.get(arm.class_level_id)?.name ?? '—') : '—',
             fromLabel: label(fromArmId),
           }
           if (!st || st.status !== 'active' || !arm) return { ...base, toArmId: null, toLabel: '—', action: 'skip' }
@@ -401,17 +406,24 @@ function PromotionDialog({
     },
   })
 
+  // Distinct class levels present in the plan, for the "class to promote" filter.
+  const levels = Array.from(new Map((plan ?? []).map((r) => [r.fromLevelId, r.fromLevelName])).entries())
+    .filter(([id]) => id)
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const visible = levelFilter ? (plan ?? []).filter((r) => r.fromLevelId === levelFilter) : plan ?? []
+
   const summary = {
-    promote: (plan ?? []).filter((r) => r.action === 'promote').length,
-    graduate: (plan ?? []).filter((r) => r.action === 'graduate').length,
-    skip: (plan ?? []).filter((r) => r.action === 'skip').length,
+    promote: visible.filter((r) => r.action === 'promote').length,
+    graduate: visible.filter((r) => r.action === 'graduate').length,
+    skip: visible.filter((r) => r.action === 'skip').length,
   }
 
   const run = useMutation({
     mutationFn: async () => {
       if (!toId) throw new Error('Choose the new session to promote into.')
       if (toId === fromId) throw new Error('The new session must be different from the current one.')
-      const rows = (plan ?? []).filter((r) => r.action === 'promote')
+      const rows = visible.filter((r) => r.action === 'promote')
       if (rows.length) {
         const enrollments = rows.map((r) => ({
           school_id: schoolId,
@@ -422,7 +434,7 @@ function PromotionDialog({
         const { error } = await supabase.from('enrollments').upsert(enrollments, { onConflict: 'student_id,session_id' })
         if (error) throw error
       }
-      const grads = (plan ?? []).filter((r) => r.action === 'graduate').map((r) => r.studentId)
+      const grads = visible.filter((r) => r.action === 'graduate').map((r) => r.studentId)
       if (grads.length) {
         const { error } = await supabase.from('students').update({ status: 'graduated' }).in('id', grads)
         if (error) throw error
@@ -503,6 +515,15 @@ function PromotionDialog({
             <p className="text-sm text-muted">Building the plan…</p>
           ) : (
             <>
+              <Field label="Class to promote" htmlFor="pr-level" hint="Promote one class, or leave as all.">
+                <Select id="pr-level" value={levelFilter} onChange={(e) => setLevelFilter(e.target.value)}>
+                  <option value="">All classes</option>
+                  {levels.map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}</option>
+                  ))}
+                </Select>
+              </Field>
+
               <div className="grid grid-cols-3 gap-2 text-center text-sm">
                 <Stat label="Promote" value={summary.promote} tone="text-success" />
                 <Stat label="Graduate" value={summary.graduate} tone="text-warning" />
@@ -510,11 +531,11 @@ function PromotionDialog({
               </div>
 
               <div className="max-h-56 overflow-y-auto rounded-md border border-border text-sm">
-                {(plan ?? []).length === 0 ? (
-                  <p className="px-4 py-3 text-muted">No students enrolled in {fromName}.</p>
+                {visible.length === 0 ? (
+                  <p className="px-4 py-3 text-muted">No students in this selection for {fromName}.</p>
                 ) : (
                   <ul className="divide-y divide-border">
-                    {(plan ?? []).map((r) => (
+                    {visible.map((r) => (
                       <li key={r.studentId} className="flex items-center justify-between gap-2 px-4 py-2">
                         <span className="min-w-0 truncate text-foreground">{r.name}</span>
                         <span className="shrink-0 text-xs text-muted">
