@@ -128,7 +128,7 @@ export function GradebookPage() {
         .eq('class_arm_id', armId)
         .eq('session_id', currentSession!.id)
       if (eErr) throw eErr
-      const rows: Row[] = (enr ?? [])
+      const allRows: Row[] = (enr ?? [])
         .map((r) => {
           const s = r.students as unknown as { first_name: string; last_name: string; admission_no: string | null } | null
           return {
@@ -138,6 +138,28 @@ export function GradebookPage() {
           }
         })
         .sort((a, b) => a.name.localeCompare(b.name))
+
+      // Show only students who offer this subject. A student with no subject
+      // selections for the session takes all subjects (safe default).
+      const studentIds = allRows.map((r) => r.studentId)
+      const offered = new Map<string, Set<string>>()
+      if (studentIds.length) {
+        const { data: ss } = await supabase
+          .from('student_subjects')
+          .select('student_id, subject_id')
+          .eq('school_id', schoolId!)
+          .eq('session_id', currentSession!.id)
+          .in('student_id', studentIds)
+        for (const r of ss ?? []) {
+          const set = offered.get(r.student_id as string) ?? new Set<string>()
+          set.add(r.subject_id as string)
+          offered.set(r.student_id as string, set)
+        }
+      }
+      const rows = allRows.filter((r) => {
+        const set = offered.get(r.studentId)
+        return !set || set.has(subjectId)
+      })
 
       // Existing scores.
       const { data: sc, error: sErr } = await supabase

@@ -2,12 +2,14 @@ import { CA_NAME, EXAM_NAME, gradeFor } from '@/lib/grading'
 
 export interface RawEnrollment {
   student_id: string
+  class_arm_id: string
   students: { first_name: string; last_name: string; middle_name: string | null; admission_no: string | null; gender: string | null; photo_url: string | null } | null
 }
 export interface RawAssessment {
   id: string
   name: string
   subject_id: string
+  class_arm_id: string
   subjects: { name: string } | null
 }
 export interface RawScore {
@@ -27,6 +29,7 @@ export interface SubjectResult {
 }
 export interface StudentResult {
   studentId: string
+  classArmId: string
   firstName: string
   lastName: string
   middleName: string | null
@@ -41,28 +44,41 @@ export interface StudentResult {
   subjectCount: number
 }
 
-interface SubjectMeta {
-  id: string
+interface AsmtMeta {
+  subjectId: string
   name: string
   caId?: string
   examId?: string
 }
 
-/** Aggregate a class's raw scores into per-student subject results, totals, and positions. */
+/**
+ * Aggregate raw scores into per-student subject results, averages, and positions.
+ *
+ * Handles multiple class arms at once so positions can be ranked across a whole
+ * class level (e.g. all of JSS 1), not just one arm. Each student's subjects are
+ * the ones assessed for THEIR arm, optionally narrowed to the subjects they
+ * offer (`offered`); a student absent from `offered` takes all assessed subjects.
+ * Ranking is by average %.
+ */
 export function computeClassResults(
   enrollments: RawEnrollment[],
   assessments: RawAssessment[],
   scores: RawScore[],
+  offered?: Map<string, Set<string>>,
 ): StudentResult[] {
-  // Group assessments into subjects with their CA/Exam ids.
-  const subjectMap = new Map<string, SubjectMeta>()
+  // Assessments grouped by arm + subject (CA/Exam pair per arm/subject).
+  const asmt = new Map<string, AsmtMeta>()
+  const armSubjects = new Map<string, Set<string>>()
   for (const a of assessments) {
-    const meta = subjectMap.get(a.subject_id) ?? { id: a.subject_id, name: a.subjects?.name ?? '—' }
+    const key = `${a.class_arm_id}::${a.subject_id}`
+    const meta = asmt.get(key) ?? { subjectId: a.subject_id, name: a.subjects?.name ?? '—' }
     if (a.name === CA_NAME) meta.caId = a.id
     else if (a.name === EXAM_NAME) meta.examId = a.id
-    subjectMap.set(a.subject_id, meta)
+    asmt.set(key, meta)
+    const set = armSubjects.get(a.class_arm_id) ?? new Set<string>()
+    set.add(a.subject_id)
+    armSubjects.set(a.class_arm_id, set)
   }
-  const subjects = [...subjectMap.values()].sort((a, b) => a.name.localeCompare(b.name))
 
   const scoreMap = new Map<string, number>()
   for (const s of scores) {
@@ -70,27 +86,37 @@ export function computeClassResults(
   }
 
   const students: StudentResult[] = enrollments.map((e) => {
-    const subjectResults: SubjectResult[] = subjects.map((sub) => {
-      const ca = sub.caId ? (scoreMap.get(`${sub.caId}:${e.student_id}`) ?? null) : null
-      const exam = sub.examId ? (scoreMap.get(`${sub.examId}:${e.student_id}`) ?? null) : null
-      const hasAny = ca != null || exam != null
-      const total = hasAny ? (ca ?? 0) + (exam ?? 0) : null
-      const band = total != null ? gradeFor(total) : null
-      return {
-        subjectId: sub.id,
-        name: sub.name,
-        ca,
-        exam,
-        total,
-        grade: band?.grade ?? null,
-        remark: band?.remark ?? null,
-      }
-    })
-    const total = subjectResults.reduce((sum, s) => sum + (s.total ?? 0), 0)
-    const count = subjects.length
-    const average = count > 0 ? Math.round((total / count) * 10) / 10 : 0
+    const armId = e.class_arm_id
+    const assessed = [...(armSubjects.get(armId) ?? new Set<string>())]
+    const offeredSet = offered?.get(e.student_id) // undefined => takes all assessed subjects
+    const subjectResults: SubjectResult[] = assessed
+      .filter((sid) => !offeredSet || offeredSet.has(sid))
+      .map((sid) => {
+        const meta = asmt.get(`${armId}::${sid}`)!
+        const ca = meta.caId ? (scoreMap.get(`${meta.caId}:${e.student_id}`) ?? null) : null
+        const exam = meta.examId ? (scoreMap.get(`${meta.examId}:${e.student_id}`) ?? null) : null
+        const hasAny = ca != null || exam != null
+        const total = hasAny ? (ca ?? 0) + (exam ?? 0) : null
+        const band = total != null ? gradeFor(total) : null
+        return {
+          subjectId: sid,
+          name: meta.name,
+          ca,
+          exam,
+          total,
+          grade: band?.grade ?? null,
+          remark: band?.remark ?? null,
+        }
+      })
+      .sort((a, b) => a.name.localeCompare(b.name))
+
+    // Average over the subjects that actually have a result.
+    const scored = subjectResults.filter((s) => s.total != null)
+    const total = scored.reduce((sum, s) => sum + (s.total ?? 0), 0)
+    const average = scored.length ? Math.round((total / scored.length) * 10) / 10 : 0
     return {
       studentId: e.student_id,
+      classArmId: armId,
       firstName: e.students?.first_name ?? '',
       lastName: e.students?.last_name ?? '',
       middleName: e.students?.middle_name ?? null,
@@ -102,16 +128,27 @@ export function computeClassResults(
       average,
       grade: gradeFor(average).grade,
       position: 0,
-      subjectCount: count,
+      subjectCount: subjectResults.length,
     }
   })
 
-  // Rank by total (desc); ties share a position.
-  const ranked = [...students].sort((a, b) => b.total - a.total)
+  // Rank by average (desc); ties share a position.
+  const ranked = [...students].sort((a, b) => b.average - a.average)
   ranked.forEach((s, i) => {
-    if (i > 0 && ranked[i - 1].total === s.total) s.position = ranked[i - 1].position
+    if (i > 0 && ranked[i - 1].average === s.average) s.position = ranked[i - 1].position
     else s.position = i + 1
   })
 
   return students.sort((a, b) => a.lastName.localeCompare(b.lastName))
+}
+
+/** Build a studentId -> offered subjectIds map from student_subjects rows. */
+export function buildOfferedMap(rows: { student_id: string; subject_id: string }[]): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>()
+  for (const r of rows) {
+    const set = map.get(r.student_id) ?? new Set<string>()
+    set.add(r.subject_id)
+    map.set(r.student_id, set)
+  }
+  return map
 }

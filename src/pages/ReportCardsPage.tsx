@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, FileText } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useSchool } from '@/providers/SchoolProvider'
-import { computeClassResults, type RawAssessment, type RawEnrollment, type RawScore } from '@/lib/results'
+import { buildOfferedMap, computeClassResults, type RawAssessment, type RawEnrollment, type RawScore } from '@/lib/results'
 import { ordinal } from '@/lib/grading'
 import { PageHeader } from '@/components/PageHeader'
 import { ReportCard } from '@/components/ReportCard'
@@ -54,17 +54,22 @@ export function ReportCardsPage() {
   }, [terms, termId])
 
   const { data: arms } = useQuery({
-    queryKey: ['class_options', schoolId],
+    queryKey: ['class_options_lvl', schoolId],
     enabled: !!schoolId,
     queryFn: async () => {
       const { data } = await supabase
         .from('class_arms')
-        .select('id, name, class_levels(name, sort_order)')
+        .select('id, name, class_level_id, class_levels(name, sort_order)')
         .eq('school_id', schoolId!)
       return (data ?? [])
         .map((a) => {
           const level = a.class_levels as unknown as { name: string; sort_order: number } | null
-          return { id: a.id as string, label: `${level?.name ?? '—'} ${a.name}` }
+          return {
+            id: a.id as string,
+            levelId: a.class_level_id as string,
+            levelName: level?.name ?? '—',
+            label: `${level?.name ?? '—'} ${a.name}`,
+          }
         })
         .sort((x, y) => x.label.localeCompare(y.label))
     },
@@ -72,22 +77,27 @@ export function ReportCardsPage() {
 
   const ready = !!schoolId && !!armId && !!termId && !!currentSession
 
+  // The class level of the selected arm, and every arm within it — so positions
+  // are ranked across the whole level (e.g. all of JSS 1), not a single arm.
+  const selectedArm = arms?.find((a) => a.id === armId)
+  const levelArmIds = (arms ?? []).filter((a) => a.levelId === selectedArm?.levelId).map((a) => a.id)
+
   const { data: results, isFetching } = useQuery({
-    queryKey: ['class_results', schoolId, armId, termId, currentSession?.id],
-    enabled: ready,
+    queryKey: ['class_results', schoolId, selectedArm?.levelId, termId, currentSession?.id],
+    enabled: ready && !!selectedArm,
     queryFn: async () => {
       const [{ data: enr }, { data: assess }] = await Promise.all([
         supabase
           .from('enrollments')
-          .select('id, student_id, students(first_name, last_name, middle_name, admission_no, gender, photo_url)')
+          .select('id, student_id, class_arm_id, students(first_name, last_name, middle_name, admission_no, gender, photo_url)')
           .eq('school_id', schoolId!)
-          .eq('class_arm_id', armId)
+          .in('class_arm_id', levelArmIds)
           .eq('session_id', currentSession!.id),
         supabase
           .from('assessments')
-          .select('id, name, subject_id, subjects(name)')
+          .select('id, name, subject_id, class_arm_id, subjects(name)')
           .eq('school_id', schoolId!)
-          .eq('class_arm_id', armId)
+          .in('class_arm_id', levelArmIds)
           .eq('term_id', termId),
       ])
 
@@ -101,6 +111,19 @@ export function ReportCardsPage() {
         scores = (sc ?? []) as RawScore[]
       }
 
+      // Which subjects each student offers this session (empty => all assessed).
+      const studentIds = (enr ?? []).map((e) => e.student_id as string)
+      let offered = new Map<string, Set<string>>()
+      if (studentIds.length) {
+        const { data: ss } = await supabase
+          .from('student_subjects')
+          .select('student_id, subject_id')
+          .eq('school_id', schoolId!)
+          .eq('session_id', currentSession!.id)
+          .in('student_id', studentIds)
+        offered = buildOfferedMap((ss ?? []) as { student_id: string; subject_id: string }[])
+      }
+
       const enrollmentIdByStudent = new Map<string, string>()
       for (const e of enr ?? []) enrollmentIdByStudent.set(e.student_id as string, e.id as string)
 
@@ -108,8 +131,10 @@ export function ReportCardsPage() {
         (enr ?? []) as unknown as RawEnrollment[],
         (assess ?? []) as unknown as RawAssessment[],
         scores,
+        offered,
       )
-      return { students, enrollmentIdByStudent }
+      // Everyone in the level (for level-wide position count) and just this arm.
+      return { students, armStudents: students.filter((s) => s.classArmId === armId), enrollmentIdByStudent }
     },
   })
 
@@ -192,7 +217,7 @@ export function ReportCardsPage() {
         <Card>
           <CardBody className="py-12 text-center text-sm text-muted">Computing results…</CardBody>
         </Card>
-      ) : !results || results.students.length === 0 ? (
+      ) : !results || results.armStudents.length === 0 ? (
         <Card>
           <CardBody className="py-12 text-center text-sm text-muted">
             No students are enrolled in this class for the current session.
@@ -200,6 +225,10 @@ export function ReportCardsPage() {
         </Card>
       ) : (
         <Card>
+          <div className="border-b border-border px-5 py-2.5 text-xs text-muted">
+            Position is ranked across all of <span className="font-medium text-foreground">{selectedArm?.levelName}</span>{' '}
+            ({results.students.length} students).
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[560px] text-sm">
               <thead>
@@ -213,7 +242,7 @@ export function ReportCardsPage() {
                 </tr>
               </thead>
               <tbody>
-                {results.students.map((s) => (
+                {results.armStudents.map((s) => (
                   <tr key={s.studentId} className="border-b border-border last:border-0">
                     <td className="px-5 py-3 font-mono text-xs text-muted">{ordinal(s.position)}</td>
                     <td className="px-5 py-3 font-medium text-foreground">

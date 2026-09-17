@@ -109,6 +109,12 @@ export type Database = {
         Update: { id?: string; school_id?: string; staff_id?: string; subject_id?: string }
         Relationships: []
       }
+      student_subjects: {
+        Row: { id: string; school_id: string; student_id: string; subject_id: string; session_id: string; created_at: string }
+        Insert: { id?: string; school_id: string; student_id: string; subject_id: string; session_id: string; created_at?: string }
+        Update: { id?: string; school_id?: string; student_id?: string; subject_id?: string; session_id?: string; created_at?: string }
+        Relationships: []
+      }
       academic_sessions: {
         Row: {
           created_at: string
