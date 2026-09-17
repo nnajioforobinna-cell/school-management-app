@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CalendarDays, Check, Plus, Trash2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
@@ -320,17 +320,21 @@ export function AcademicsTab() {
 /* ------------------------------------------------------------------ */
 /* Promotion & graduation wizard                                       */
 /* ------------------------------------------------------------------ */
-interface PromoRow {
-  studentId: string
-  name: string
-  fromArmId: string
-  fromLevelId: string
-  fromLevelName: string
-  fromLabel: string
-  toArmId: string | null
-  toLabel: string
-  action: 'promote' | 'graduate' | 'skip'
+interface SourceArm {
+  armId: string
+  levelId: string
+  levelName: string
+  armName: string
+  label: string
+  count: number
+  studentIds: string[]
+  nextLevelId: string | null
+  nextLevelName: string
+  nextArms: { id: string; label: string }[]
+  sameNameTargetId: string | null
 }
+
+const CREATE = '__create__'
 
 function PromotionDialog({
   schoolId,
@@ -349,19 +353,21 @@ function PromotionDialog({
   const [toId, setToId] = useState('')
   const [levelFilter, setLevelFilter] = useState('')
   const [makeCurrent, setMakeCurrent] = useState(true)
+  const [dest, setDest] = useState<Record<string, string>>({})
+  const [destKey, setDestKey] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
 
   const { data: plan, isFetching } = useQuery({
     queryKey: ['promotion_plan', schoolId, fromId],
     enabled: !!fromId,
-    queryFn: async (): Promise<PromoRow[]> => {
+    queryFn: async (): Promise<SourceArm[]> => {
       const [{ data: levels }, { data: arms }, { data: enr }] = await Promise.all([
         supabase.from('class_levels').select('id, name, sort_order').eq('school_id', schoolId).order('sort_order'),
         supabase.from('class_arms').select('id, name, class_level_id').eq('school_id', schoolId),
         supabase
           .from('enrollments')
-          .select('student_id, class_arm_id, students(first_name, last_name, status)')
+          .select('student_id, class_arm_id, students(status)')
           .eq('school_id', schoolId)
           .eq('session_id', fromId),
       ])
@@ -369,72 +375,104 @@ function PromotionDialog({
       const armList = (arms ?? []) as { id: string; name: string; class_level_id: string }[]
       const armById = new Map(armList.map((a) => [a.id, a]))
       const levelById = new Map(levelList.map((l) => [l.id, l]))
+      const armsByLevel = new Map<string, { id: string; name: string; label: string }[]>()
+      for (const a of armList) {
+        const arr = armsByLevel.get(a.class_level_id) ?? []
+        arr.push({ id: a.id, name: a.name, label: `${levelById.get(a.class_level_id)?.name ?? '—'} ${a.name}` })
+        armsByLevel.set(a.class_level_id, arr)
+      }
       const nextLevelId = (levelId: string): string | null => {
         const lvl = levelById.get(levelId)
         if (!lvl) return null
-        const next = levelList.find((l) => l.sort_order > lvl.sort_order)
-        return next?.id ?? null // null => graduating (highest level)
-      }
-      const armByLevelName = new Map(armList.map((a) => [`${a.class_level_id}::${a.name}`, a.id]))
-      const label = (armId: string | null) => {
-        if (!armId) return '—'
-        const a = armById.get(armId)
-        return a ? `${levelById.get(a.class_level_id)?.name ?? '—'} ${a.name}` : '—'
+        return levelList.find((l) => l.sort_order > lvl.sort_order)?.id ?? null
       }
 
-      return (enr ?? [])
-        .map((e): PromoRow => {
-          const st = e.students as unknown as { first_name: string; last_name: string; status: string } | null
-          const fromArmId = e.class_arm_id as string
-          const arm = armById.get(fromArmId)
-          const base = {
-            studentId: e.student_id as string,
-            name: st ? `${st.last_name}, ${st.first_name}` : '',
-            fromArmId,
-            fromLevelId: arm?.class_level_id ?? '',
-            fromLevelName: arm ? (levelById.get(arm.class_level_id)?.name ?? '—') : '—',
-            fromLabel: label(fromArmId),
-          }
-          if (!st || st.status !== 'active' || !arm) return { ...base, toArmId: null, toLabel: '—', action: 'skip' }
-          const next = nextLevelId(arm.class_level_id)
-          if (next === null) return { ...base, toArmId: null, toLabel: 'Graduate', action: 'graduate' }
-          const toArmId = armByLevelName.get(`${next}::${arm.name}`) ?? null
-          if (!toArmId) return { ...base, toArmId: null, toLabel: `No ${label(fromArmId).replace(arm.name, '').trim()} → next arm`, action: 'skip' }
-          return { ...base, toArmId, toLabel: label(toArmId), action: 'promote' }
+      // Group active students by their current arm.
+      const byArm = new Map<string, string[]>()
+      for (const e of enr ?? []) {
+        const st = e.students as unknown as { status: string } | null
+        if (!st || st.status !== 'active') continue
+        const arr = byArm.get(e.class_arm_id as string) ?? []
+        arr.push(e.student_id as string)
+        byArm.set(e.class_arm_id as string, arr)
+      }
+
+      const out: SourceArm[] = []
+      for (const [armId, studentIds] of byArm) {
+        const arm = armById.get(armId)
+        if (!arm) continue
+        const levelName = levelById.get(arm.class_level_id)?.name ?? '—'
+        const next = nextLevelId(arm.class_level_id)
+        const nextArms = next ? (armsByLevel.get(next) ?? []).map((a) => ({ id: a.id, label: a.label })) : []
+        const sameNameTargetId = next ? (armsByLevel.get(next) ?? []).find((a) => a.name === arm.name)?.id ?? null : null
+        out.push({
+          armId,
+          levelId: arm.class_level_id,
+          levelName,
+          armName: arm.name,
+          label: `${levelName} ${arm.name}`,
+          count: studentIds.length,
+          studentIds,
+          nextLevelId: next,
+          nextLevelName: next ? (levelById.get(next)?.name ?? '') : '',
+          nextArms,
+          sameNameTargetId,
         })
-        .sort((a, b) => a.fromLabel.localeCompare(b.fromLabel) || a.name.localeCompare(b.name))
+      }
+      return out.sort((a, b) => a.label.localeCompare(b.label))
     },
   })
 
-  // Distinct class levels present in the plan, for the "class to promote" filter.
-  const levels = Array.from(new Map((plan ?? []).map((r) => [r.fromLevelId, r.fromLevelName])).entries())
-    .filter(([id]) => id)
+  // Default each source arm's destination once the plan for this session loads.
+  useEffect(() => {
+    if (!plan) return
+    const key = `${fromId}:${plan.map((p) => p.armId).join(',')}`
+    if (destKey === key) return
+    const next: Record<string, string> = {}
+    for (const p of plan) {
+      if (p.nextLevelId) next[p.armId] = p.sameNameTargetId ?? CREATE
+    }
+    setDest(next)
+    setDestKey(key)
+  }, [plan, fromId, destKey])
+
+  const levels = Array.from(new Map((plan ?? []).map((r) => [r.levelId, r.levelName])).entries())
     .map(([id, name]) => ({ id, name }))
     .sort((a, b) => a.name.localeCompare(b.name))
-  const visible = levelFilter ? (plan ?? []).filter((r) => r.fromLevelId === levelFilter) : plan ?? []
+  const visible = levelFilter ? (plan ?? []).filter((r) => r.levelId === levelFilter) : plan ?? []
 
-  const summary = {
-    promote: visible.filter((r) => r.action === 'promote').length,
-    graduate: visible.filter((r) => r.action === 'graduate').length,
-    skip: visible.filter((r) => r.action === 'skip').length,
-  }
+  const promoteCount = visible.filter((r) => r.nextLevelId).reduce((n, r) => n + r.count, 0)
+  const graduateCount = visible.filter((r) => !r.nextLevelId).reduce((n, r) => n + r.count, 0)
 
   const run = useMutation({
     mutationFn: async () => {
       if (!toId) throw new Error('Choose the new session to promote into.')
       if (toId === fromId) throw new Error('The new session must be different from the current one.')
-      const rows = visible.filter((r) => r.action === 'promote')
-      if (rows.length) {
-        const enrollments = rows.map((r) => ({
+
+      for (const arm of visible) {
+        if (!arm.nextLevelId) continue
+        let targetArmId = dest[arm.armId]
+        if (!targetArmId) throw new Error(`Choose where ${arm.label} goes.`)
+        if (targetArmId === CREATE) {
+          const { data: created, error } = await supabase
+            .from('class_arms')
+            .insert({ school_id: schoolId, class_level_id: arm.nextLevelId, name: arm.armName })
+            .select('id')
+            .single()
+          if (error) throw error
+          targetArmId = created!.id as string
+        }
+        const rows = arm.studentIds.map((sid) => ({
           school_id: schoolId,
-          student_id: r.studentId,
-          class_arm_id: r.toArmId!,
+          student_id: sid,
+          class_arm_id: targetArmId,
           session_id: toId,
         }))
-        const { error } = await supabase.from('enrollments').upsert(enrollments, { onConflict: 'student_id,session_id' })
+        const { error } = await supabase.from('enrollments').upsert(rows, { onConflict: 'student_id,session_id' })
         if (error) throw error
       }
-      const grads = visible.filter((r) => r.action === 'graduate').map((r) => r.studentId)
+
+      const grads = visible.filter((r) => !r.nextLevelId).flatMap((r) => r.studentIds)
       if (grads.length) {
         const { error } = await supabase.from('students').update({ status: 'graduated' }).in('id', grads)
         if (error) throw error
@@ -444,9 +482,7 @@ function PromotionDialog({
         await supabase.from('academic_sessions').update({ is_current: true }).eq('id', toId)
       }
     },
-    onSuccess: () => {
-      setDone(`Promoted ${summary.promote}, graduated ${summary.graduate}.`)
-    },
+    onSuccess: () => setDone(`Promoted ${promoteCount}, graduated ${graduateCount}.`),
     onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Could not run promotion.'),
   })
 
@@ -457,8 +493,8 @@ function PromotionDialog({
       open
       onClose={onClose}
       title="Promote students"
-      description="Move every class up a level for the new session."
-      className="max-w-lg"
+      description="Send each class up to the next one for the new session."
+      className="max-w-xl"
       footer={
         done ? (
           <Button onClick={onDone}>Done</Button>
@@ -467,11 +503,11 @@ function PromotionDialog({
             <Button variant="outline" onClick={onClose}>Cancel</Button>
             <Button
               onClick={() => {
-                if (confirm(`Promote ${summary.promote} student(s) into the new session and graduate ${summary.graduate}? Repeaters can be moved back afterwards.`))
+                if (confirm(`Promote ${promoteCount} student(s) and graduate ${graduateCount}? Repeaters can be moved back afterwards.`))
                   run.mutate()
               }}
               loading={run.isPending}
-              disabled={!toId || summary.promote + summary.graduate === 0}
+              disabled={!toId || promoteCount + graduateCount === 0}
             >
               Run promotion
             </Button>
@@ -486,9 +522,7 @@ function PromotionDialog({
           </span>
           <div>
             <p className="font-medium text-foreground">{done}</p>
-            <p className="mt-1 text-sm text-muted">
-              Now move any repeaters back to their previous class from the Students page.
-            </p>
+            <p className="mt-1 text-sm text-muted">Now move any repeaters back to their previous class from the Students page.</p>
           </div>
         </div>
       ) : (
@@ -515,39 +549,55 @@ function PromotionDialog({
             <p className="text-sm text-muted">Building the plan…</p>
           ) : (
             <>
-              <Field label="Class to promote" htmlFor="pr-level" hint="Promote one class, or leave as all.">
-                <Select id="pr-level" value={levelFilter} onChange={(e) => setLevelFilter(e.target.value)}>
-                  <option value="">All classes</option>
-                  {levels.map((l) => (
-                    <option key={l.id} value={l.id}>{l.name}</option>
-                  ))}
-                </Select>
-              </Field>
+              {levels.length > 1 && (
+                <Field label="Class to promote" htmlFor="pr-level" hint="Promote one class, or leave as all.">
+                  <Select id="pr-level" value={levelFilter} onChange={(e) => setLevelFilter(e.target.value)}>
+                    <option value="">All classes</option>
+                    {levels.map((l) => (
+                      <option key={l.id} value={l.id}>{l.name}</option>
+                    ))}
+                  </Select>
+                </Field>
+              )}
 
-              <div className="grid grid-cols-3 gap-2 text-center text-sm">
-                <Stat label="Promote" value={summary.promote} tone="text-success" />
-                <Stat label="Graduate" value={summary.graduate} tone="text-warning" />
-                <Stat label="Skipped" value={summary.skip} />
-              </div>
-
-              <div className="max-h-56 overflow-y-auto rounded-md border border-border text-sm">
+              <div>
+                <p className="mb-1.5 text-xs font-medium uppercase tracking-wider text-faint">Where each class goes</p>
                 {visible.length === 0 ? (
-                  <p className="px-4 py-3 text-muted">No students in this selection for {fromName}.</p>
+                  <div className="rounded-md border border-border px-4 py-3 text-sm text-muted">
+                    No students in this selection for {fromName}.
+                  </div>
                 ) : (
-                  <ul className="divide-y divide-border">
-                    {visible.map((r) => (
-                      <li key={r.studentId} className="flex items-center justify-between gap-2 px-4 py-2">
-                        <span className="min-w-0 truncate text-foreground">{r.name}</span>
-                        <span className="shrink-0 text-xs text-muted">
-                          {r.fromLabel} <span className="text-faint">→</span>{' '}
-                          <span className={r.action === 'graduate' ? 'text-warning' : r.action === 'skip' ? 'text-danger' : 'text-success'}>
-                            {r.toLabel}
-                          </span>
-                        </span>
+                  <ul className="flex flex-col gap-2">
+                    {visible.map((arm) => (
+                      <li key={arm.armId} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-4 py-2.5">
+                        <div className="min-w-0 flex-1">
+                          <p className="font-medium text-foreground">{arm.label}</p>
+                          <p className="text-xs text-muted">{arm.count} student{arm.count === 1 ? '' : 's'}</p>
+                        </div>
+                        <span className="text-faint">&rarr;</span>
+                        {arm.nextLevelId ? (
+                          <Select
+                            value={dest[arm.armId] ?? CREATE}
+                            onChange={(e) => setDest((m) => ({ ...m, [arm.armId]: e.target.value }))}
+                            className="w-auto min-w-[10rem]"
+                          >
+                            {arm.nextArms.map((a) => (
+                              <option key={a.id} value={a.id}>{a.label}</option>
+                            ))}
+                            <option value={CREATE}>+ New {arm.nextLevelName} {arm.armName}</option>
+                          </Select>
+                        ) : (
+                          <span className="rounded-full bg-warning/15 px-2.5 py-1 text-xs font-medium text-warning">Graduate</span>
+                        )}
                       </li>
                     ))}
                   </ul>
                 )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 text-center text-sm">
+                <Stat label="Promoting" value={promoteCount} tone="text-success" />
+                <Stat label="Graduating" value={graduateCount} tone="text-warning" />
               </div>
 
               <label className="flex items-center gap-2 text-sm text-foreground">
@@ -560,7 +610,7 @@ function PromotionDialog({
                 Set the new session as current after promoting
               </label>
               <p className="text-xs text-muted">
-                Skipped = graduated/withdrawn students, or a class whose next-level arm doesn’t exist yet.
+                Pick an existing arm to merge classes, or &ldquo;+ New&hellip;&rdquo; to create the next arm.
               </p>
             </>
           )}
