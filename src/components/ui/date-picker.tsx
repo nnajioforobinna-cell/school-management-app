@@ -79,7 +79,7 @@ export function DatePicker({ value, onChange, id, minYear, maxYear, className }:
   const dayCount = daysInMonth(parts.y || now.getFullYear(), parts.m || 1)
 
   return (
-    <div id={id} className={`grid grid-cols-[1fr_1.3fr_1fr] gap-2 ${className ?? ''}`}>
+    <div id={id} className={`grid min-w-[13rem] grid-cols-[1fr_1.4fr_1.1fr] gap-2 ${className ?? ''}`}>
       <Select value={parts.d || ''} onChange={(e) => update({ d: Number(e.target.value) })} aria-label="Day">
         <option value="">Day</option>
         {Array.from({ length: dayCount }, (_, i) => i + 1).map((dd) => (

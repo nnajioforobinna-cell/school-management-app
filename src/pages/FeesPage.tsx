@@ -440,7 +440,8 @@ function InvoicesTab() {
   const rows = data?.rows
   const feeCols = data?.feeCols ?? []
 
-  // Generate invoices for students who don't have one yet.
+  // Generate or refresh invoices so every student's bill matches the current
+  // applicable fee structures (adds new fees, removes duplicates/stale items).
   const generate = useMutation({
     mutationFn: async () => {
       if (!arm || !session) return
@@ -455,24 +456,35 @@ function InvoicesTab() {
       if (!fees.length) throw new Error('No fees apply to this class/term. Add fees in the Fee structure tab.')
       const total = fees.reduce((s, f) => s + Number(f.amount), 0)
 
-      const missing = (rows ?? []).filter((r) => !r.invoiceId)
-      for (const r of missing) {
-        const { data: inv, error } = await supabase
-          .from('invoices')
-          .insert({
-            school_id: schoolId,
-            student_id: r.studentId,
-            session_id: session.id,
-            term_id: termId,
-            total,
-            status: 'issued',
-            reference: `INV-${Date.now().toString(36).toUpperCase()}-${r.admissionNo ?? ''}`,
-          })
-          .select('id')
-          .single()
-        if (error) throw error
-        const items = fees.map((f) => ({ school_id: schoolId, invoice_id: inv.id as string, fee_structure_id: f.id, description: f.name, amount: Number(f.amount) }))
-        await supabase.from('invoice_items').insert(items)
+      for (const r of rows ?? []) {
+        let invoiceId = r.invoiceId
+        if (!invoiceId) {
+          const { data: inv, error } = await supabase
+            .from('invoices')
+            .insert({
+              school_id: schoolId,
+              student_id: r.studentId,
+              session_id: session.id,
+              term_id: termId,
+              total,
+              status: 'issued',
+              reference: `INV-${Date.now().toString(36).toUpperCase()}-${r.admissionNo ?? ''}`,
+            })
+            .select('id')
+            .single()
+          if (error) throw error
+          invoiceId = inv.id as string
+        } else {
+          // Rebuild the items from the current fee structures (dedupes + updates)
+          // and refresh the invoice total.
+          const { error: delErr } = await supabase.from('invoice_items').delete().eq('invoice_id', invoiceId)
+          if (delErr) throw delErr
+          const { error: updErr } = await supabase.from('invoices').update({ total }).eq('id', invoiceId)
+          if (updErr) throw updErr
+        }
+        const items = fees.map((f) => ({ school_id: schoolId, invoice_id: invoiceId!, fee_structure_id: f.id, description: f.name, amount: Number(f.amount) }))
+        const { error: insErr } = await supabase.from('invoice_items').insert(items)
+        if (insErr) throw insErr
       }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['invoice_rows', schoolId, armId, termId] }),
@@ -597,7 +609,7 @@ function InvoicesTab() {
             </Select>
             <ExportButtons onPdf={exportPdf} onExcel={exportXlsx} />
             <Button variant="outline" onClick={() => generate.mutate()} loading={generate.isPending}>
-              <Wand2 className="h-4 w-4" /> Generate invoices
+              <Wand2 className="h-4 w-4" /> Generate / update invoices
             </Button>
           </div>
 
@@ -654,7 +666,9 @@ function InvoicesTab() {
                         <td className="px-4 py-3 text-center"><StatusPill status={r.status} /></td>
                         <td className="px-4 py-3 text-right">
                           {r.invoiceId && balance > 0 && (
-                            <Button variant="outline" size="sm" onClick={() => setPayFor(r)}>Record payment</Button>
+                            <Button variant="outline" size="sm" className="whitespace-nowrap px-4" onClick={() => setPayFor(r)}>
+                              Record payment
+                            </Button>
                           )}
                         </td>
                       </tr>

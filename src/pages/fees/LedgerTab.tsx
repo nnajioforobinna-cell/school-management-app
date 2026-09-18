@@ -186,13 +186,17 @@ export function LedgerTab() {
         </Button>
       </div>
 
-      <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
-        <span className="text-muted">Date range:</span>
-        <div className="w-40"><DatePicker value={from} onChange={setFrom} minYear={2015} /></div>
-        <span className="text-faint">to</span>
-        <div className="w-40"><DatePicker value={to} onChange={setTo} minYear={2015} /></div>
+      <div className="mb-4 flex flex-wrap items-end gap-3 text-sm">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-muted">From date</label>
+          <DatePicker value={from} onChange={setFrom} minYear={2015} />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-muted">To date</label>
+          <DatePicker value={to} onChange={setTo} minYear={2015} />
+        </div>
         {(from || to) && (
-          <button className="text-primary hover:underline" onClick={() => { setFrom(''); setTo('') }}>Clear dates</button>
+          <button className="pb-2 text-primary hover:underline" onClick={() => { setFrom(''); setTo('') }}>Clear dates</button>
         )}
       </div>
 
