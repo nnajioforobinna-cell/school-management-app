@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Printer } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useSchool } from '@/providers/SchoolProvider'
 import type { Tables } from '@/types/database'
-import { docHeaderHtml, printHtml, tableHtml } from '@/lib/print'
+import { docHeaderHtml, printHtml, tableHtml, type Column } from '@/lib/print'
+import { exportSheet } from '@/lib/excel'
+import { ExportButtons } from '@/components/ExportButtons'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -89,8 +90,13 @@ export function TimetablePage() {
     return s ? `${s.first_name.charAt(0)}. ${s.last_name}` : ''
   }
 
-  const exportTimetable = () => {
-    const rows = PERIODS.map((p) => {
+  const exportCols: Column[] = [
+    { key: 'period', label: 'Period' },
+    { key: 'time', label: 'Time', align: 'center' as const },
+    ...DAYS.map((d) => ({ key: `d${d.n}`, label: d.label, align: 'center' as const })),
+  ]
+  const exportRows = () =>
+    PERIODS.map((p) => {
       const row: Record<string, unknown> = { period: `Period ${p}` }
       // Period time range — taken from the first day in this period that has times set.
       let time = ''
@@ -112,24 +118,18 @@ export function TimetablePage() {
       }
       return row
     })
-    const armLabel = arms?.find((a) => a.id === armId)?.label ?? ''
+  const armLabel = () => arms?.find((a) => a.id === armId)?.label ?? ''
+  const exportPdf = () => {
     const header = docHeaderHtml({
       name: activeSchool?.name ?? 'School',
       address: activeSchool?.address,
       logoUrl: activeSchool?.logo_url,
       title: 'Class Timetable',
-      subtitle: armLabel,
+      subtitle: armLabel(),
     })
-    const table = tableHtml(
-      [
-        { key: 'period', label: 'Period' },
-        { key: 'time', label: 'Time', align: 'center' as const },
-        ...DAYS.map((d) => ({ key: `d${d.n}`, label: d.label, align: 'center' as const })),
-      ],
-      rows,
-    )
-    printHtml('Class Timetable', header + table)
+    printHtml('Class Timetable', header + tableHtml(exportCols, exportRows()))
   }
+  const exportXlsx = () => exportSheet('Class Timetable', exportCols, exportRows(), 'Timetable', 'Class Timetable')
 
   return (
     <div>
@@ -172,11 +172,7 @@ export function TimetablePage() {
               </div>
             </div>
           )}
-          {armId && (
-            <Button variant="outline" onClick={exportTimetable}>
-              <Printer className="h-4 w-4" /> Export / Print
-            </Button>
-          )}
+          {armId && <ExportButtons onPdf={exportPdf} onExcel={exportXlsx} />}
         </CardBody>
       </Card>
 

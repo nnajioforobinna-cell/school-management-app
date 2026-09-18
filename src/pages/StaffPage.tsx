@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Users, Pencil, Plus, Printer, Search, Trash2, KeyRound, Check, Copy, Camera, X } from 'lucide-react'
+import { Users, Pencil, Plus, Search, Trash2, KeyRound, Check, Copy, Camera, X } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useSchool } from '@/providers/SchoolProvider'
 import type { Tables } from '@/types/database'
 import { uploadStaffPhoto, removeStaffPhoto, STAFF_PHOTOS } from '@/lib/storage'
-import { docHeaderHtml, printHtml, tableHtml } from '@/lib/print'
+import { docHeaderHtml, printHtml, tableHtml, type Column } from '@/lib/print'
+import { exportSheet } from '@/lib/excel'
+import { ExportButtons } from '@/components/ExportButtons'
 import { cn, formatDate } from '@/lib/utils'
 import { Avatar } from '@/components/StudentAvatar'
 import { PageHeader } from '@/components/PageHeader'
@@ -109,8 +111,17 @@ export function StaffPage() {
     })
   }, [staff, search, dept])
 
-  const exportList = () => {
-    const rows = filtered.map((m) => ({
+  const exportCols: Column[] = [
+    { key: 'no', label: 'Staff No.' },
+    { key: 'name', label: 'Name' },
+    { key: 'qual', label: 'Qualification' },
+    { key: 'subjects', label: 'Subjects' },
+    { key: 'dept', label: 'Department' },
+    { key: 'employed', label: 'Employed' },
+    { key: 'contact', label: 'Contact' },
+  ]
+  const exportRows = () =>
+    filtered.map((m) => ({
       no: m.staff_no ?? '—',
       name: `${m.title ? m.title + ' ' : ''}${m.first_name} ${m.last_name}`,
       qual: m.qualification ?? '—',
@@ -119,6 +130,8 @@ export function StaffPage() {
       employed: m.employment_date ? formatDate(m.employment_date, { day: 'numeric', month: 'short', year: 'numeric' }) : '—',
       contact: m.email ?? m.phone ?? '—',
     }))
+  const exportPdf = () => {
+    const rows = exportRows()
     const header = docHeaderHtml({
       name: activeSchool?.name ?? 'School',
       address: activeSchool?.address,
@@ -126,20 +139,9 @@ export function StaffPage() {
       title: 'Staff List',
       subtitle: `${rows.length} staff${dept ? ' · ' + dept : ''}`,
     })
-    const table = tableHtml(
-      [
-        { key: 'no', label: 'Staff No.' },
-        { key: 'name', label: 'Name' },
-        { key: 'qual', label: 'Qualification' },
-        { key: 'subjects', label: 'Subjects' },
-        { key: 'dept', label: 'Department' },
-        { key: 'employed', label: 'Employed' },
-        { key: 'contact', label: 'Contact' },
-      ],
-      rows,
-    )
-    printHtml('Staff List', header + table)
+    printHtml('Staff List', header + tableHtml(exportCols, rows))
   }
+  const exportXlsx = () => exportSheet('Staff List', exportCols, exportRows(), 'Staff', 'Staff List')
 
   if (isLoading) return <FullScreenLoader />
 
@@ -167,9 +169,7 @@ export function StaffPage() {
               <option key={d} value={d}>{d}</option>
             ))}
           </Select>
-          <Button variant="outline" onClick={exportList}>
-            <Printer className="h-4 w-4" /> Export / Print
-          </Button>
+          <ExportButtons onPdf={exportPdf} onExcel={exportXlsx} />
         </div>
       )}
 

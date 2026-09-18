@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { Check, NotebookPen, Printer, Save } from 'lucide-react'
+import { Check, NotebookPen, Save } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useSchool } from '@/providers/SchoolProvider'
 import { useSync } from '@/providers/SyncProvider'
-import { docHeaderHtml, printHtml, tableHtml } from '@/lib/print'
+import { docHeaderHtml, printHtml, tableHtml, type Column } from '@/lib/print'
+import { exportSheet } from '@/lib/excel'
+import { ExportButtons } from '@/components/ExportButtons'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -234,9 +236,16 @@ export function GradebookPage() {
     return { entered: n, avg: n ? Math.round((sum / n) * 10) / 10 : 0 }
   }, [data, ca, exam])
 
-  const exportGradebook = () => {
-    if (!data) return
-    const rows = data.rows.map((r) => {
+  const exportCols: Column[] = [
+    { key: 'adm', label: 'Adm. No.' },
+    { key: 'name', label: 'Student' },
+    { key: 'ca', label: `C.A. (${CA_MAX})`, align: 'center' },
+    { key: 'exam', label: `Exam (${EXAM_MAX})`, align: 'center' },
+    { key: 'total', label: 'Total', align: 'center' },
+    { key: 'grade', label: 'Grade', align: 'center' },
+  ]
+  const exportRows = () =>
+    (data?.rows ?? []).map((r) => {
       const c = ca[r.studentId] ?? ''
       const e = exam[r.studentId] ?? ''
       const has = c !== '' || e !== ''
@@ -250,27 +259,25 @@ export function GradebookPage() {
         grade: has ? gradeFor(total).grade : '—',
       }
     })
+  const subjectLabel = () => {
     const armLabel = arms?.find((a) => a.id === armId)?.label ?? ''
     const subjectName = subjects?.find((s) => s.id === subjectId)?.name ?? ''
+    return `${armLabel} · ${subjectName} · ${currentTerm?.name ?? ''} term ${currentSession?.name ?? ''}`
+  }
+  const exportPdf = () => {
+    if (!data) return
     const header = docHeaderHtml({
       name: activeSchool?.name ?? 'School',
       address: activeSchool?.address,
       logoUrl: activeSchool?.logo_url,
       title: 'Gradebook',
-      subtitle: `${armLabel} · ${subjectName} · ${currentTerm?.name ?? ''} term ${currentSession?.name ?? ''}`,
+      subtitle: subjectLabel(),
     })
-    const table = tableHtml(
-      [
-        { key: 'adm', label: 'Adm. No.' },
-        { key: 'name', label: 'Student' },
-        { key: 'ca', label: `C.A. (${CA_MAX})`, align: 'center' },
-        { key: 'exam', label: `Exam (${EXAM_MAX})`, align: 'center' },
-        { key: 'total', label: 'Total', align: 'center' },
-        { key: 'grade', label: 'Grade', align: 'center' },
-      ],
-      rows,
-    )
-    printHtml('Gradebook', header + table)
+    printHtml('Gradebook', header + tableHtml(exportCols, exportRows()))
+  }
+  const exportXlsx = () => {
+    if (!data) return
+    exportSheet('Gradebook', exportCols, exportRows(), 'Gradebook', 'Gradebook')
   }
 
   return (
@@ -349,9 +356,7 @@ export function GradebookPage() {
                   <Check className="h-4 w-4" /> {savedMsg}
                 </span>
               )}
-              <Button variant="outline" onClick={exportGradebook}>
-                <Printer className="h-4 w-4" /> Export / Print
-              </Button>
+              <ExportButtons onPdf={exportPdf} onExcel={exportXlsx} />
               <Button onClick={() => save.mutate()} loading={save.isPending}>
                 <Save className="h-4 w-4" /> Save scores
               </Button>

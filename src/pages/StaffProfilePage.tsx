@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Pencil, Printer, KeyRound, UserX } from 'lucide-react'
+import { ArrowLeft, Pencil, KeyRound, UserX } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useSchool } from '@/providers/SchoolProvider'
 import type { Tables } from '@/types/database'
 import { STAFF_PHOTOS } from '@/lib/storage'
-import { docHeaderHtml, printHtml, tableHtml } from '@/lib/print'
+import { docHeaderHtml, printHtml, tableHtml, type Column } from '@/lib/print'
+import { exportSheet } from '@/lib/excel'
+import { ExportButtons } from '@/components/ExportButtons'
 import { formatDate } from '@/lib/utils'
 import { Avatar } from '@/components/StudentAvatar'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
@@ -60,7 +62,23 @@ export function StaffProfilePage() {
 
   const fullName = `${staff.title ? staff.title + ' ' : ''}${staff.first_name} ${staff.last_name}`
 
-  const printProfile = () => {
+  const profileCols: Column[] = [
+    { key: 'field', label: 'Field' },
+    { key: 'value', label: 'Value' },
+  ]
+  const profileRows = () => [
+    { field: 'Staff No.', value: staff.staff_no ?? '—' },
+    { field: 'Name', value: fullName },
+    { field: 'Qualification', value: staff.qualification ?? '—' },
+    { field: 'Subjects taught', value: (subjects ?? []).join(', ') || '—' },
+    { field: 'Department', value: staff.department ?? '—' },
+    { field: 'Date of employment', value: staff.employment_date ? formatDate(staff.employment_date) : '—' },
+    { field: 'Email', value: staff.email ?? '—' },
+    { field: 'Phone', value: staff.phone ?? '—' },
+    { field: 'Employment status', value: staff.employment_status },
+    { field: 'Login access', value: staff.user_id ? 'Active' : 'None' },
+  ]
+  const exportPdf = () => {
     const header = docHeaderHtml({
       name: activeSchool?.name ?? 'School',
       address: activeSchool?.address,
@@ -68,26 +86,9 @@ export function StaffProfilePage() {
       title: 'Staff Profile',
       subtitle: fullName,
     })
-    const table = tableHtml(
-      [
-        { key: 'field', label: 'Field' },
-        { key: 'value', label: 'Value' },
-      ],
-      [
-        { field: 'Staff No.', value: staff.staff_no ?? '—' },
-        { field: 'Name', value: fullName },
-        { field: 'Qualification', value: staff.qualification ?? '—' },
-        { field: 'Subjects taught', value: (subjects ?? []).join(', ') || '—' },
-        { field: 'Department', value: staff.department ?? '—' },
-        { field: 'Date of employment', value: staff.employment_date ? formatDate(staff.employment_date) : '—' },
-        { field: 'Email', value: staff.email ?? '—' },
-        { field: 'Phone', value: staff.phone ?? '—' },
-        { field: 'Employment status', value: staff.employment_status },
-        { field: 'Login access', value: staff.user_id ? 'Active' : 'None' },
-      ],
-    )
-    printHtml('Staff Profile', header + table)
+    printHtml('Staff Profile', header + tableHtml(profileCols, profileRows()))
   }
+  const exportXlsx = () => exportSheet(`Staff - ${fullName}`, profileCols, profileRows(), 'Profile', 'Staff Profile')
 
   return (
     <div>
@@ -111,9 +112,7 @@ export function StaffProfilePage() {
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={printProfile}>
-              <Printer className="h-4 w-4" /> Print
-            </Button>
+            <ExportButtons onPdf={exportPdf} onExcel={exportXlsx} size="sm" />
             {canManage && (
               <Button variant="outline" onClick={() => setEditing(true)}>
                 <Pencil className="h-4 w-4" /> Edit

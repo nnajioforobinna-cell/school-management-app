@@ -115,6 +115,18 @@ export type Database = {
         Update: { id?: string; school_id?: string; student_id?: string; subject_id?: string; session_id?: string; created_at?: string }
         Relationships: []
       }
+      ledger_categories: {
+        Row: { id: string; school_id: string; name: string; kind: 'income' | 'expense'; created_at: string }
+        Insert: { id?: string; school_id: string; name: string; kind: 'income' | 'expense'; created_at?: string }
+        Update: { id?: string; school_id?: string; name?: string; kind?: 'income' | 'expense'; created_at?: string }
+        Relationships: []
+      }
+      ledger_entries: {
+        Row: { id: string; school_id: string; date: string; kind: 'income' | 'expense'; category_id: string | null; party: string | null; description: string | null; amount: number; session_id: string | null; term_id: string | null; created_by: string | null; created_at: string }
+        Insert: { id?: string; school_id: string; date?: string; kind: 'income' | 'expense'; category_id?: string | null; party?: string | null; description?: string | null; amount?: number; session_id?: string | null; term_id?: string | null; created_by?: string | null; created_at?: string }
+        Update: { id?: string; school_id?: string; date?: string; kind?: 'income' | 'expense'; category_id?: string | null; party?: string | null; description?: string | null; amount?: number; session_id?: string | null; term_id?: string | null; created_by?: string | null; created_at?: string }
+        Relationships: []
+      }
       academic_sessions: {
         Row: {
           created_at: string

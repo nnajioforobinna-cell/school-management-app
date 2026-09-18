@@ -1,12 +1,14 @@
 import { useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Camera, GraduationCap, Pencil, Plus, Printer, Search, Trash2, X } from 'lucide-react'
+import { Camera, GraduationCap, Pencil, Plus, Search, Trash2, X } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useSchool } from '@/providers/SchoolProvider'
 import type { Tables } from '@/types/database'
 import { uploadStudentPhoto, removeStudentPhoto, studentPhotoPath } from '@/lib/storage'
-import { docHeaderHtml, printHtml, tableHtml } from '@/lib/print'
+import { docHeaderHtml, printHtml, tableHtml, type Column } from '@/lib/print'
+import { exportSheet } from '@/lib/excel'
+import { ExportButtons } from '@/components/ExportButtons'
 import { PageHeader } from '@/components/PageHeader'
 import { StudentAvatar } from '@/components/StudentAvatar'
 import { Card } from '@/components/ui/card'
@@ -134,14 +136,23 @@ export function StudentsPage() {
     })
   }, [students, search, genderFilter, classFilter, enrolments])
 
-  const exportList = () => {
-    const rows = filtered.map((s) => ({
+  const exportCols: Column[] = [
+    { key: 'adm', label: 'Admission No.' },
+    { key: 'name', label: 'Name' },
+    { key: 'klass', label: 'Class' },
+    { key: 'gender', label: 'Gender' },
+    { key: 'status', label: 'Status' },
+  ]
+  const exportRows = () =>
+    filtered.map((s) => ({
       adm: s.admission_no ?? '—',
       name: `${s.last_name}, ${s.first_name}${s.middle_name ? ' ' + s.middle_name : ''}`,
       klass: enrolments?.get(s.id)?.label || '—',
       gender: s.gender ?? '—',
       status: s.status,
     }))
+  const exportPdf = () => {
+    const rows = exportRows()
     const bits = [
       `${rows.length} student(s)`,
       classFilter ? classOptions?.find((c) => c.id === classFilter)?.label : '',
@@ -154,18 +165,9 @@ export function StudentsPage() {
       title: 'Students List',
       subtitle: bits.join(' · '),
     })
-    const table = tableHtml(
-      [
-        { key: 'adm', label: 'Admission No.' },
-        { key: 'name', label: 'Name' },
-        { key: 'klass', label: 'Class' },
-        { key: 'gender', label: 'Gender' },
-        { key: 'status', label: 'Status' },
-      ],
-      rows,
-    )
-    printHtml('Students List', header + table)
+    printHtml('Students List', header + tableHtml(exportCols, rows))
   }
+  const exportXlsx = () => exportSheet('Students List', exportCols, exportRows(), 'Students', 'Students List')
 
   if (isLoading) return <FullScreenLoader />
 
@@ -212,9 +214,7 @@ export function StudentsPage() {
             <option value="Male">Male</option>
             <option value="Female">Female</option>
           </Select>
-          <Button variant="outline" onClick={exportList}>
-            <Printer className="h-4 w-4" /> Export / Print
-          </Button>
+          <ExportButtons onPdf={exportPdf} onExcel={exportXlsx} />
         </div>
       )}
 

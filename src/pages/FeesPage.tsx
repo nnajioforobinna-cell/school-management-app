@@ -6,9 +6,13 @@ import { useAuth } from '@/providers/AuthProvider'
 import { useSchool } from '@/providers/SchoolProvider'
 import { useSync } from '@/providers/SyncProvider'
 import type { Tables } from '@/types/database'
-import { docHeaderHtml, escapeHtml, printHtml, tableHtml } from '@/lib/print'
+import { docHeaderHtml, escapeHtml, printHtml, tableHtml, type Column } from '@/lib/print'
+import { exportSheet } from '@/lib/excel'
+import { ExportButtons } from '@/components/ExportButtons'
 import { formatDate, formatMoney } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
+import { LedgerTab } from '@/pages/fees/LedgerTab'
+import { FinancialReportTab } from '@/pages/fees/FinancialReportTab'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,6 +28,8 @@ const TERM_LABEL: Record<string, string> = { first: 'First Term', second: 'Secon
 const TABS = [
   { id: 'invoices', label: 'Invoices & payments' },
   { id: 'structure', label: 'Fee structure' },
+  { id: 'ledger', label: 'Accounts ledger' },
+  { id: 'report', label: 'Financial report' },
 ] as const
 type TabId = (typeof TABS)[number]['id']
 
@@ -51,7 +57,10 @@ export function FeesPage() {
           </button>
         ))}
       </div>
-      {activeSchool && (tab === 'invoices' ? <InvoicesTab /> : <FeeStructureTab />)}
+      {activeSchool && tab === 'invoices' && <InvoicesTab />}
+      {activeSchool && tab === 'structure' && <FeeStructureTab />}
+      {activeSchool && tab === 'ledger' && <LedgerTab />}
+      {activeSchool && tab === 'report' && <FinancialReportTab />}
     </div>
   )
 }
@@ -264,6 +273,15 @@ interface InvoiceRow {
   status: string
   arrears: number
   history: { label: string; balance: number }[]
+  breakdown: Record<string, number>
+}
+interface FeeCol {
+  key: string
+  label: string
+}
+interface InvoiceData {
+  rows: InvoiceRow[]
+  feeCols: FeeCol[]
 }
 
 const TERM_ORDER: Record<string, number> = { first: 1, second: 2, third: 3 }
@@ -308,10 +326,10 @@ function InvoicesTab() {
   const ready = !!armId && !!termId && !!session
   const arm = arms?.find((a) => a.id === armId)
 
-  const { data: rows, isFetching } = useQuery({
+  const { data, isFetching } = useQuery({
     queryKey: ['invoice_rows', schoolId, armId, termId, session?.id],
     enabled: ready,
-    queryFn: async (): Promise<InvoiceRow[]> => {
+    queryFn: async (): Promise<InvoiceData> => {
       const { data: enr } = await supabase
         .from('enrollments')
         .select('student_id, students(first_name, last_name, admission_no)')
@@ -360,8 +378,38 @@ function InvoicesTab() {
       }
       const termLabel = (sName: string, tName: string) => `${TERM_LABEL[tName] ?? tName} ${sName}`.trim()
 
-      return students
-        .map((s) => {
+      // Per-fee-structure breakdown of the current term's invoice for each student.
+      const currentInvId = new Map<string, string>()
+      for (const s of students) {
+        const inv = (byStudent.get(s.id) ?? []).find((i) => i.termId === termId)
+        if (inv) currentInvId.set(s.id, inv.id)
+      }
+      const feeColMap = new Map<string, string>()
+      const breakdownByStudent = new Map<string, Record<string, number>>()
+      const invIds = [...currentInvId.values()]
+      if (invIds.length) {
+        const { data: items } = await supabase
+          .from('invoice_items')
+          .select('invoice_id, fee_structure_id, description, amount')
+          .in('invoice_id', invIds)
+        const studentByInv = new Map<string, string>()
+        for (const [sid, iid] of currentInvId) studentByInv.set(iid, sid)
+        for (const it of items ?? []) {
+          const key = (it.fee_structure_id as string) ?? `d:${it.description}`
+          feeColMap.set(key, it.description as string)
+          const sid = studentByInv.get(it.invoice_id as string)
+          if (!sid) continue
+          const bd = breakdownByStudent.get(sid) ?? {}
+          bd[key] = (bd[key] ?? 0) + Number(it.amount)
+          breakdownByStudent.set(sid, bd)
+        }
+      }
+      const feeCols: FeeCol[] = [...feeColMap.entries()]
+        .map(([key, label]) => ({ key, label }))
+        .sort((a, b) => a.label.localeCompare(b.label))
+
+      const rows = students
+        .map((s): InvoiceRow => {
           const invs = byStudent.get(s.id) ?? []
           const current = invs.find((i) => i.termId === termId)
           const arrears = invs
@@ -380,11 +428,17 @@ function InvoicesTab() {
             status: current?.status ?? 'none',
             arrears,
             history,
+            breakdown: breakdownByStudent.get(s.id) ?? {},
           }
         })
         .sort((a, b) => a.name.localeCompare(b.name))
+
+      return { rows, feeCols }
     },
   })
+
+  const rows = data?.rows
+  const feeCols = data?.feeCols ?? []
 
   // Generate invoices for students who don't have one yet.
   const generate = useMutation({
@@ -449,16 +503,35 @@ function InvoicesTab() {
   const statusText = (s: string) =>
     s === 'paid' ? 'Paid' : s === 'part_paid' ? 'Part-paid' : s === 'none' ? 'No invoice' : 'Unpaid'
 
-  const exportList = () => {
-    const out = filteredRows.map((r) => ({
-      adm: r.admissionNo ?? '—',
-      name: r.name,
-      total: r.invoiceId ? formatMoney(r.total, currency) : '—',
-      paid: r.invoiceId ? formatMoney(r.paid, currency) : '—',
-      balance: r.invoiceId ? formatMoney(r.total - r.paid, currency) : '—',
-      arrears: r.arrears > 0 ? formatMoney(r.arrears, currency) : '—',
-      status: statusText(r.status),
-    }))
+  const exportCols: Column[] = [
+    { key: 'adm', label: 'Adm. No.' },
+    { key: 'name', label: 'Student' },
+    ...feeCols.map((fc) => ({ key: `fee_${fc.key}`, label: fc.label, align: 'right' as const })),
+    { key: 'total', label: 'Total', align: 'right' as const },
+    { key: 'paid', label: 'Paid', align: 'right' as const },
+    { key: 'balance', label: 'Balance', align: 'right' as const },
+    { key: 'arrears', label: 'Arrears', align: 'right' as const },
+    { key: 'status', label: 'Status', align: 'center' as const },
+  ]
+  const exportRows = (formatted: boolean) =>
+    filteredRows.map((r) => {
+      const money = (n: number) => (formatted ? formatMoney(n, currency) : n)
+      const row: Record<string, unknown> = {
+        adm: r.admissionNo ?? '—',
+        name: r.name,
+        total: r.invoiceId ? money(r.total) : formatted ? '—' : 0,
+        paid: r.invoiceId ? money(r.paid) : formatted ? '—' : 0,
+        balance: r.invoiceId ? money(r.total - r.paid) : formatted ? '—' : 0,
+        arrears: r.arrears > 0 ? money(r.arrears) : formatted ? '—' : 0,
+        status: statusText(r.status),
+      }
+      for (const fc of feeCols) {
+        const v = r.breakdown[fc.key]
+        row[`fee_${fc.key}`] = v != null ? money(v) : formatted ? '—' : 0
+      }
+      return row
+    })
+  const exportPdf = () => {
     const termLabel = TERM_LABEL[terms?.find((t) => t.id === termId)?.name ?? ''] ?? ''
     const header = docHeaderHtml({
       name: activeSchool?.name ?? 'School',
@@ -467,20 +540,9 @@ function InvoicesTab() {
       title: 'Fees Register',
       subtitle: `${arm?.label ?? ''} · ${termLabel} · Collected ${formatMoney(summary.collected, currency)} of ${formatMoney(summary.billed, currency)}`,
     })
-    const table = tableHtml(
-      [
-        { key: 'adm', label: 'Adm. No.' },
-        { key: 'name', label: 'Student' },
-        { key: 'total', label: 'Total', align: 'right' },
-        { key: 'paid', label: 'Paid', align: 'right' },
-        { key: 'balance', label: 'Balance', align: 'right' },
-        { key: 'arrears', label: 'Arrears', align: 'right' },
-        { key: 'status', label: 'Status', align: 'center' },
-      ],
-      out,
-    )
-    printHtml('Fees Register', header + table)
+    printHtml('Fees Register', header + tableHtml(exportCols, exportRows(true)))
   }
+  const exportXlsx = () => exportSheet('Fees Register', exportCols, exportRows(false), 'Fees', 'Fees Register')
 
   return (
     <div>
@@ -533,9 +595,7 @@ function InvoicesTab() {
               <option value="unpaid">Unpaid</option>
               <option value="arrears">Owing arrears</option>
             </Select>
-            <Button variant="outline" onClick={exportList}>
-              <Printer className="h-4 w-4" /> Export / Print
-            </Button>
+            <ExportButtons onPdf={exportPdf} onExcel={exportXlsx} />
             <Button variant="outline" onClick={() => generate.mutate()} loading={generate.isPending}>
               <Wand2 className="h-4 w-4" /> Generate invoices
             </Button>
@@ -547,6 +607,9 @@ function InvoicesTab() {
                 <thead>
                   <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-faint">
                     <th className="px-5 py-3 font-medium">Student</th>
+                    {feeCols.map((fc) => (
+                      <th key={fc.key} className="px-3 py-3 text-right font-medium">{fc.label}</th>
+                    ))}
                     <th className="px-4 py-3 text-right font-medium">Total</th>
                     <th className="px-4 py-3 text-right font-medium">Paid</th>
                     <th className="px-4 py-3 text-right font-medium">Balance</th>
@@ -573,6 +636,11 @@ function InvoicesTab() {
                             </>
                           )}
                         </td>
+                        {feeCols.map((fc) => (
+                          <td key={fc.key} className="px-3 py-3 text-right tabular-nums text-muted">
+                            {r.breakdown[fc.key] != null ? formatMoney(r.breakdown[fc.key], currency) : '—'}
+                          </td>
+                        ))}
                         <td className="px-4 py-3 text-right tabular-nums">{r.invoiceId ? formatMoney(r.total, currency) : '—'}</td>
                         <td className="px-4 py-3 text-right tabular-nums text-success">{r.invoiceId ? formatMoney(r.paid, currency) : '—'}</td>
                         <td className="px-4 py-3 text-right font-medium tabular-nums">{r.invoiceId ? formatMoney(balance, currency) : '—'}</td>

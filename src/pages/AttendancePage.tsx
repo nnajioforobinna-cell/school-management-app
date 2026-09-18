@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { Check, ClipboardCheck, Printer, Save, Search } from 'lucide-react'
+import { Check, ClipboardCheck, Save, Search } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/providers/AuthProvider'
 import { useSchool } from '@/providers/SchoolProvider'
 import { useSync } from '@/providers/SyncProvider'
 import type { Database } from '@/types/database'
-import { docHeaderHtml, printHtml, tableHtml } from '@/lib/print'
+import { docHeaderHtml, printHtml, tableHtml, type Column } from '@/lib/print'
+import { exportSheet } from '@/lib/excel'
+import { ExportButtons } from '@/components/ExportButtons'
 import { formatDate } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { StudentAvatar } from '@/components/StudentAvatar'
@@ -170,11 +172,17 @@ export function AttendancePage() {
 
   const armLabel = arms?.find((a) => a.id === armId)?.label ?? ''
 
-  const exportDay = () => {
-    const rows = (roster ?? []).map((s) => {
+  const dayCols: Column[] = [
+    { key: 'adm', label: 'Admission No.' },
+    { key: 'name', label: 'Name' },
+    { key: 'status', label: 'Status', align: 'center' },
+  ]
+  const dayRows = () =>
+    (roster ?? []).map((s) => {
       const st = statuses[s.enrollmentId] ?? 'present'
       return { adm: s.admissionNo ?? '—', name: `${s.lastName}, ${s.firstName}`, status: st.charAt(0).toUpperCase() + st.slice(1) }
     })
+  const exportDayPdf = () => {
     const header = docHeaderHtml({
       name: activeSchool?.name ?? 'School',
       address: activeSchool?.address,
@@ -182,16 +190,9 @@ export function AttendancePage() {
       title: 'Daily Attendance',
       subtitle: `${armLabel} · ${formatDate(date)}`,
     })
-    const table = tableHtml(
-      [
-        { key: 'adm', label: 'Admission No.' },
-        { key: 'name', label: 'Name' },
-        { key: 'status', label: 'Status', align: 'center' },
-      ],
-      rows,
-    )
-    printHtml('Daily Attendance', header + table)
+    printHtml('Daily Attendance', header + tableHtml(dayCols, dayRows()))
   }
+  const exportDayXlsx = () => exportSheet('Daily Attendance', dayCols, dayRows(), 'Attendance', 'Daily Attendance')
 
   const save = useMutation({
     mutationFn: async (): Promise<'synced' | 'queued'> => {
@@ -283,9 +284,7 @@ export function AttendancePage() {
                   <Check className="h-4 w-4" /> {savedMsg}
                 </span>
               )}
-              <Button variant="outline" onClick={exportDay}>
-                <Printer className="h-4 w-4" /> Export / Print
-              </Button>
+              <ExportButtons onPdf={exportDayPdf} onExcel={exportDayXlsx} />
               <Button onClick={() => save.mutate()} loading={save.isPending}>
                 <Save className="h-4 w-4" /> Save attendance
               </Button>
@@ -388,7 +387,13 @@ function StudentAttendanceDialog({
   const marked = records.length
   const rate = marked ? Math.round(((counts.present + counts.late) / marked) * 100) : null
 
-  const print = () => {
+  const recCols: Column[] = [
+    { key: 'date', label: 'Date' },
+    { key: 'status', label: 'Status', align: 'center' },
+  ]
+  const recRows = () =>
+    records.map((r) => ({ date: formatDate(r.date, { day: 'numeric', month: 'short', year: 'numeric' }), status: STATUS_LABEL[r.status] }))
+  const exportPdf = () => {
     const header = docHeaderHtml({
       name: school.name,
       address: school.address,
@@ -396,15 +401,10 @@ function StudentAttendanceDialog({
       title: 'Attendance Record',
       subtitle: `${student.lastName}, ${student.firstName}${student.admissionNo ? ' · ' + student.admissionNo : ''} · Present ${counts.present + counts.late}/${marked}${rate != null ? ' (' + rate + '%)' : ''}`,
     })
-    const table = tableHtml(
-      [
-        { key: 'date', label: 'Date' },
-        { key: 'status', label: 'Status', align: 'center' },
-      ],
-      records.map((r) => ({ date: formatDate(r.date, { day: 'numeric', month: 'short', year: 'numeric' }), status: STATUS_LABEL[r.status] })),
-    )
-    printHtml('Attendance Record', header + table)
+    printHtml('Attendance Record', header + tableHtml(recCols, recRows()))
   }
+  const exportXlsx = () =>
+    exportSheet(`Attendance - ${student.lastName} ${student.firstName}`, recCols, recRows(), 'Attendance', 'Attendance Record')
 
   return (
     <Dialog
@@ -416,7 +416,7 @@ function StudentAttendanceDialog({
       footer={
         <>
           <Button variant="outline" onClick={onClose}>Close</Button>
-          <Button onClick={print}><Printer className="h-4 w-4" /> Print</Button>
+          <ExportButtons onPdf={exportPdf} onExcel={exportXlsx} size="sm" />
         </>
       }
     >
