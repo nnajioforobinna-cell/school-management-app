@@ -994,6 +994,7 @@ export type Database = {
       payments: {
         Row: {
           amount: number
+          allocation: Json | null
           bank_name: string | null
           created_at: string
           id: string
@@ -1009,6 +1010,7 @@ export type Database = {
         }
         Insert: {
           amount: number
+          allocation?: Json | null
           bank_name?: string | null
           created_at?: string
           id?: string
@@ -1024,6 +1026,7 @@ export type Database = {
         }
         Update: {
           amount?: number
+          allocation?: Json | null
           bank_name?: string | null
           created_at?: string
           id?: string

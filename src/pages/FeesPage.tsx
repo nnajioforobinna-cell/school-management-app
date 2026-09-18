@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Receipt, Plus, Pencil, Trash2, FileUp, Wand2, Check, Printer, Search } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
@@ -304,11 +304,14 @@ function InvoicesTab() {
     enabled: !!session,
     queryFn: async () => {
       const { data } = await supabase.from('terms').select('id, name, is_current').eq('session_id', session!.id).order('name')
-      const list = (data ?? []) as { id: string; name: string; is_current: boolean }[]
-      if (!termId && list.length) setTermId((list.find((t) => t.is_current) ?? list[0]).id)
-      return list
+      return (data ?? []) as { id: string; name: string; is_current: boolean }[]
     },
   })
+  // Default to the current term once terms load. Done in an effect (not inside
+  // the query) so it still runs when the terms come from the persisted cache.
+  useEffect(() => {
+    if (!termId && terms && terms.length) setTermId((terms.find((t) => t.is_current) ?? terms[0]).id)
+  }, [terms, termId])
   const { data: arms } = useQuery({
     queryKey: ['class_arms_full', schoolId],
     queryFn: async () => {
@@ -911,22 +914,68 @@ function PaymentDialog({
   const { user } = useAuth()
   const { pushPayment } = useSync()
   const balance = row.total - row.paid
-  const [amount, setAmount] = useState(String(balance))
   const [bank, setBank] = useState('')
   const [teller, setTeller] = useState('')
   const [reference, setReference] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [queued, setQueued] = useState(false)
+  const [inputs, setInputs] = useState<Record<string, string>>({})
+  const [initDone, setInitDone] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // The invoice's fee structures and how much of each is still outstanding
+  // (billed minus what earlier payments already allocated to it).
+  const { data: fees } = useQuery({
+    queryKey: ['pay_fees', row.invoiceId],
+    enabled: !!row.invoiceId,
+    queryFn: async () => {
+      const [{ data: items }, { data: pays }] = await Promise.all([
+        supabase.from('invoice_items').select('fee_structure_id, description, amount').eq('invoice_id', row.invoiceId!),
+        supabase.from('payments').select('allocation').eq('invoice_id', row.invoiceId!),
+      ])
+      const allocated = new Map<string, number>()
+      for (const p of pays ?? []) {
+        const a = (p.allocation ?? {}) as Record<string, number>
+        for (const [k, v] of Object.entries(a)) allocated.set(k, (allocated.get(k) ?? 0) + Number(v))
+      }
+      return (items ?? []).map((it) => {
+        const key = (it.fee_structure_id as string) ?? `desc:${it.description}`
+        const billed = Number(it.amount)
+        return { key, label: it.description as string, billed, remaining: Math.max(0, billed - (allocated.get(key) ?? 0)) }
+      })
+    },
+  })
+
+  // Default each fee's input to its outstanding amount, once loaded.
+  useEffect(() => {
+    if (fees && !initDone) {
+      const init: Record<string, string> = {}
+      for (const f of fees) init[f.key] = f.remaining > 0 ? String(f.remaining) : ''
+      setInputs(init)
+      setInitDone(true)
+    }
+  }, [fees, initDone])
+
+  const hasFees = (fees?.length ?? 0) > 0
+  const total = hasFees
+    ? (fees ?? []).reduce((s, f) => s + (Number(inputs[f.key]) || 0), 0)
+    : Number(inputs.__single ?? '') || 0
 
   const save = useMutation({
     mutationFn: async () => {
+      const allocation: Record<string, number> = {}
+      if (hasFees) {
+        for (const f of fees ?? []) {
+          const v = Number(inputs[f.key]) || 0
+          if (v > 0) allocation[f.key] = v
+        }
+      }
       const row_ = {
         id: crypto.randomUUID(),
         school_id: schoolId,
         invoice_id: row.invoiceId!,
-        amount: Number(amount) || 0,
+        amount: total,
         method: 'bank_transfer',
         bank_name: bank.trim() || null,
         teller_no: teller.trim() || null,
@@ -934,6 +983,7 @@ function PaymentDialog({
         status: 'confirmed',
         recorded_by: user?.id ?? null,
         paid_at: new Date().toISOString(),
+        allocation: hasFees ? allocation : null,
       }
       return pushPayment({ row: row_, receipt: file })
     },
@@ -959,7 +1009,7 @@ function PaymentDialog({
           </span>
           <div>
             <p className="font-medium text-foreground">
-              Payment of {formatMoney(Number(amount) || 0, currency)} recorded offline.
+              Payment of {formatMoney(total, currency)} recorded offline.
             </p>
             <p className="mt-1 text-sm text-muted">
               It will sync automatically when you&apos;re back online
@@ -981,16 +1031,44 @@ function PaymentDialog({
       footer={
         <>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={() => save.mutate()} loading={save.isPending} disabled={!amount || Number(amount) <= 0}>
-            Record payment
+          <Button onClick={() => save.mutate()} loading={save.isPending} disabled={total <= 0}>
+            Record {formatMoney(total, currency)}
           </Button>
         </>
       }
     >
       <div className="flex flex-col gap-4">
-        <Field label="Amount paid" htmlFor="p-amt">
-          <Input id="p-amt" type="number" min={0} max={balance} value={amount} onChange={(e) => setAmount(e.target.value)} />
-        </Field>
+        {hasFees ? (
+          <div>
+            <p className="mb-1.5 text-sm font-medium text-foreground">Amount paid — by fee</p>
+            <div className="rounded-md border border-border">
+              {(fees ?? []).map((f) => (
+                <div key={f.key} className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-0">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm text-foreground">{f.label}</p>
+                    <p className="text-xs text-muted">Outstanding {formatMoney(f.remaining, currency)}</p>
+                  </div>
+                  <Input
+                    type="number"
+                    min={0}
+                    className="w-28 text-right tabular-nums"
+                    value={inputs[f.key] ?? ''}
+                    onChange={(e) => setInputs((m) => ({ ...m, [f.key]: e.target.value }))}
+                  />
+                </div>
+              ))}
+              <div className="flex items-center justify-between bg-muted-surface px-3 py-2">
+                <span className="text-sm font-medium text-foreground">Total</span>
+                <span className="font-semibold tabular-nums text-foreground">{formatMoney(total, currency)}</span>
+              </div>
+            </div>
+            <p className="mt-1 text-xs text-muted">Enter how much of this payment goes to each fee.</p>
+          </div>
+        ) : (
+          <Field label="Amount paid" htmlFor="p-amt">
+            <Input id="p-amt" type="number" min={0} max={balance} value={inputs.__single ?? ''} onChange={(e) => setInputs((m) => ({ ...m, __single: e.target.value }))} />
+          </Field>
+        )}
         <div className="grid grid-cols-2 gap-4">
           <Field label="Bank" htmlFor="p-bank">
             <Input id="p-bank" value={bank} onChange={(e) => setBank(e.target.value)} placeholder="First Bank" />

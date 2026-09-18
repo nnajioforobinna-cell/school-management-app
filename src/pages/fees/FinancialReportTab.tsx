@@ -58,30 +58,41 @@ export function FinancialReportTab() {
     queryKey: ['financial_report', schoolId, sessionId, termId],
     enabled: !!sessionId,
     queryFn: async (): Promise<ReportData> => {
-      // --- Fee income (from payments, allocated across each invoice's items) ---
+      // --- Fee income: sum the ACTUAL amount each payment allocated to each fee
+      //     structure (no proportional guessing). ---
       let invQuery = supabase
         .from('invoices')
-        .select('total, amount_paid, term_id, invoice_items(description, amount)')
+        .select('id, invoice_items(fee_structure_id, description, amount)')
         .eq('school_id', schoolId)
         .eq('session_id', sessionId)
       if (termId) invQuery = invQuery.eq('term_id', termId)
       const { data: invoices } = await invQuery
 
-      const feeMap = new Map<string, number>()
+      const invoiceIds = (invoices ?? []).map((i) => i.id as string)
+      const keyLabel = new Map<string, string>()
       for (const inv of invoices ?? []) {
-        const total = Number(inv.total)
-        const paid = Number(inv.amount_paid)
-        const factor = total > 0 ? paid / total : 0
-        const items = (inv.invoice_items as unknown as { description: string; amount: number }[]) ?? []
-        for (const it of items) {
-          const collected = Number(it.amount) * factor
-          feeMap.set(it.description, (feeMap.get(it.description) ?? 0) + collected)
+        const items = (inv.invoice_items as unknown as { fee_structure_id: string | null; description: string }[]) ?? []
+        for (const it of items) keyLabel.set(it.fee_structure_id ?? `desc:${it.description}`, it.description)
+      }
+
+      const feeMap = new Map<string, number>()
+      let unallocated = 0
+      if (invoiceIds.length) {
+        const { data: pays } = await supabase.from('payments').select('amount, allocation').in('invoice_id', invoiceIds)
+        for (const p of pays ?? []) {
+          const a = (p.allocation ?? null) as Record<string, number> | null
+          if (a && Object.keys(a).length) {
+            for (const [k, v] of Object.entries(a)) feeMap.set(k, (feeMap.get(k) ?? 0) + Number(v))
+          } else {
+            unallocated += Number(p.amount) // legacy payment with no per-fee split
+          }
         }
       }
       const fees: Line[] = [...feeMap.entries()]
-        .map(([label, amount]) => ({ label, amount: Math.round(amount * 100) / 100 }))
-        .filter((l) => l.amount > 0.005)
+        .map(([key, amount]) => ({ label: keyLabel.get(key) ?? 'Fees', amount }))
+        .filter((l) => l.amount > 0)
         .sort((a, b) => b.amount - a.amount)
+      if (unallocated > 0) fees.push({ label: 'Fees (unallocated)', amount: unallocated })
 
       // --- Ledger income & expenses by category ---
       let ledQuery = supabase
