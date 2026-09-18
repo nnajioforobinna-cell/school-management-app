@@ -294,7 +294,14 @@ function InvoicesTab() {
   const [armId, setArmId] = useState('')
   const [termId, setTermId] = useState('')
   const [payFor, setPayFor] = useState<InvoiceRow | null>(null)
+  const [editingPayment, setEditingPayment] = useState<EditablePayment | null>(null)
   const [detailFor, setDetailFor] = useState<InvoiceRow | null>(null)
+
+  const refreshFees = () => {
+    qc.invalidateQueries({ queryKey: ['invoice_rows', schoolId, armId, termId] })
+    qc.invalidateQueries({ queryKey: ['pay_fees'] })
+    qc.invalidateQueries({ queryKey: ['invoice_detail'] })
+  }
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
 
@@ -689,10 +696,15 @@ function InvoicesTab() {
           schoolId={schoolId}
           currency={currency}
           row={payFor}
-          onClose={() => setPayFor(null)}
+          editing={editingPayment}
+          onClose={() => {
+            setPayFor(null)
+            setEditingPayment(null)
+          }}
           onSaved={() => {
             setPayFor(null)
-            qc.invalidateQueries({ queryKey: ['invoice_rows', schoolId, armId, termId] })
+            setEditingPayment(null)
+            refreshFees()
           }}
         />
       )}
@@ -706,9 +718,16 @@ function InvoicesTab() {
           sessionName={session?.name ?? ''}
           onClose={() => setDetailFor(null)}
           onRecordPayment={() => {
+            setEditingPayment(null)
             setPayFor(detailFor)
             setDetailFor(null)
           }}
+          onEditPayment={(p) => {
+            setEditingPayment(p)
+            setPayFor(detailFor)
+            setDetailFor(null)
+          }}
+          onChanged={refreshFees}
         />
       )}
     </div>
@@ -722,6 +741,17 @@ interface DetailSchool {
   logo_url: string | null
 }
 
+interface DetailPayment {
+  id: string
+  amount: number
+  method: string
+  bank_name: string | null
+  teller_no: string | null
+  reference: string | null
+  paid_at: string
+  allocation: Record<string, number> | null
+}
+
 function FeeDetailDialog({
   row,
   currency,
@@ -730,6 +760,8 @@ function FeeDetailDialog({
   sessionName,
   onClose,
   onRecordPayment,
+  onEditPayment,
+  onChanged,
 }: {
   row: InvoiceRow
   currency: string
@@ -738,27 +770,43 @@ function FeeDetailDialog({
   sessionName: string
   onClose: () => void
   onRecordPayment: () => void
+  onEditPayment: (p: EditablePayment) => void
+  onChanged: () => void
 }) {
-  const { data } = useQuery({
+  const { data, refetch } = useQuery({
     queryKey: ['invoice_detail', row.invoiceId],
     enabled: !!row.invoiceId,
+    staleTime: 0,
     queryFn: async () => {
       const [{ data: items }, { data: payments }, { data: inv }] = await Promise.all([
         supabase.from('invoice_items').select('description, amount').eq('invoice_id', row.invoiceId!),
-        supabase.from('payments').select('amount, method, bank_name, teller_no, reference, paid_at').eq('invoice_id', row.invoiceId!).order('paid_at', { ascending: false }),
+        supabase.from('payments').select('id, amount, method, bank_name, teller_no, reference, paid_at, allocation').eq('invoice_id', row.invoiceId!).order('paid_at', { ascending: false }),
         supabase.from('invoices').select('reference, due_date').eq('id', row.invoiceId!).maybeSingle(),
       ])
       return {
         items: (items ?? []) as { description: string; amount: number }[],
-        payments: (payments ?? []) as { amount: number; method: string; bank_name: string | null; teller_no: string | null; reference: string | null; paid_at: string }[],
+        payments: (payments ?? []) as DetailPayment[],
         reference: (inv?.reference as string) ?? '',
       }
     },
   })
 
-  const balance = row.total - row.paid
+  const del = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.from('payments').delete().eq('id', id)
+      if (error) throw error
+    },
+    onSuccess: () => {
+      refetch()
+      onChanged()
+    },
+  })
+
   const items = data?.items ?? []
   const payments = data?.payments ?? []
+  // Live figures from the payments actually on record (updates as you edit/delete).
+  const paid = payments.reduce((s, p) => s + Number(p.amount), 0)
+  const balance = row.total - paid
 
   const printInvoice = () => {
     const header = docHeaderHtml({
@@ -776,7 +824,7 @@ function FeeDetailDialog({
       [
         ...items.map((it) => ({ desc: it.description, amount: formatMoney(Number(it.amount), currency) })),
         { desc: 'TOTAL', amount: formatMoney(row.total, currency) },
-        { desc: 'Paid', amount: formatMoney(row.paid, currency) },
+        { desc: 'Paid', amount: formatMoney(paid, currency) },
         { desc: 'Balance due', amount: formatMoney(balance, currency) },
       ],
     )
@@ -790,7 +838,7 @@ function FeeDetailDialog({
       address: school.address,
       logoUrl: school.logo_url,
       title: 'Payment Statement',
-      subtitle: `${row.name}${row.admissionNo ? ' · ' + row.admissionNo : ''} · Paid ${formatMoney(row.paid, currency)} of ${formatMoney(row.total, currency)}`,
+      subtitle: `${row.name}${row.admissionNo ? ' · ' + row.admissionNo : ''} · Paid ${formatMoney(paid, currency)} of ${formatMoney(row.total, currency)}`,
     })
     const table = tableHtml(
       [
@@ -827,7 +875,7 @@ function FeeDetailDialog({
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-3 gap-2 text-center text-sm">
           <MiniMoney label="Total" value={formatMoney(row.total, currency)} />
-          <MiniMoney label="Paid" value={formatMoney(row.paid, currency)} tone="text-success" />
+          <MiniMoney label="Paid" value={formatMoney(paid, currency)} tone="text-success" />
           <MiniMoney label="Balance" value={formatMoney(balance, currency)} tone="text-danger" />
         </div>
 
@@ -868,16 +916,42 @@ function FeeDetailDialog({
           {payments.length === 0 ? (
             <p className="text-sm text-muted">No payments recorded yet.</p>
           ) : (
-            <ul className="max-h-48 overflow-y-auto rounded-md border border-border text-sm">
-              {payments.map((p, i) => (
-                <li key={i} className="flex items-center justify-between border-b border-border px-4 py-2 last:border-0">
-                  <div>
+            <ul className="max-h-56 overflow-y-auto rounded-md border border-border text-sm">
+              {payments.map((p) => (
+                <li key={p.id} className="flex items-center justify-between gap-2 border-b border-border px-4 py-2 last:border-0">
+                  <div className="min-w-0">
                     <p className="font-medium text-foreground">{formatMoney(Number(p.amount), currency)}</p>
-                    <p className="text-xs text-muted">
+                    <p className="truncate text-xs text-muted">
                       {formatDate(p.paid_at, { day: 'numeric', month: 'short', year: 'numeric' })}
                       {p.bank_name ? ` · ${p.bank_name}` : ''}
                       {p.teller_no ? ` · ${p.teller_no}` : ''}
                     </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        onEditPayment({
+                          id: p.id,
+                          amount: Number(p.amount),
+                          allocation: (p.allocation ?? null) as Record<string, number> | null,
+                          bank_name: p.bank_name,
+                          teller_no: p.teller_no,
+                          reference: p.reference,
+                        })
+                      }
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label="Delete payment"
+                      onClick={() => confirm('Delete this payment? The balance will be recalculated.') && del.mutate(p.id)}
+                    >
+                      <Trash2 className="h-4 w-4 text-danger" />
+                    </Button>
                   </div>
                 </li>
               ))}
@@ -898,25 +972,37 @@ function MiniMoney({ label, value, tone }: { label: string; value: string; tone?
   )
 }
 
+interface EditablePayment {
+  id: string
+  allocation: Record<string, number> | null
+  amount: number
+  bank_name: string | null
+  teller_no: string | null
+  reference: string | null
+}
+
 function PaymentDialog({
   schoolId,
   currency,
   row,
+  editing,
   onClose,
   onSaved,
 }: {
   schoolId: string
   currency: string
   row: InvoiceRow
+  editing?: EditablePayment | null
   onClose: () => void
   onSaved: () => void
 }) {
   const { user } = useAuth()
   const { pushPayment } = useSync()
+  const isEdit = !!editing
   const balance = row.total - row.paid
-  const [bank, setBank] = useState('')
-  const [teller, setTeller] = useState('')
-  const [reference, setReference] = useState('')
+  const [bank, setBank] = useState(editing?.bank_name ?? '')
+  const [teller, setTeller] = useState(editing?.teller_no ?? '')
+  const [reference, setReference] = useState(editing?.reference ?? '')
   const [file, setFile] = useState<File | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [queued, setQueued] = useState(false)
@@ -924,43 +1010,65 @@ function PaymentDialog({
   const [initDone, setInitDone] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
-  // The invoice's fee structures and how much of each is still outstanding
-  // (billed minus what earlier payments already allocated to it).
+  // Per fee: billed, capacity for THIS payment (billed minus what OTHER payments
+  // took), what's still owed overall, and this payment's current split (edit).
   const { data: fees } = useQuery({
-    queryKey: ['pay_fees', row.invoiceId],
+    queryKey: ['pay_fees', row.invoiceId, editing?.id ?? 'new'],
     enabled: !!row.invoiceId,
+    staleTime: 0,
     queryFn: async () => {
       const [{ data: items }, { data: pays }] = await Promise.all([
         supabase.from('invoice_items').select('fee_structure_id, description, amount').eq('invoice_id', row.invoiceId!),
-        supabase.from('payments').select('allocation').eq('invoice_id', row.invoiceId!),
+        supabase.from('payments').select('id, allocation').eq('invoice_id', row.invoiceId!),
       ])
-      const allocated = new Map<string, number>()
+      const allocatedAll = new Map<string, number>()
+      const allocatedOthers = new Map<string, number>()
       for (const p of pays ?? []) {
         const a = (p.allocation ?? {}) as Record<string, number>
-        for (const [k, v] of Object.entries(a)) allocated.set(k, (allocated.get(k) ?? 0) + Number(v))
+        for (const [k, v] of Object.entries(a)) {
+          allocatedAll.set(k, (allocatedAll.get(k) ?? 0) + Number(v))
+          if (p.id !== editing?.id) allocatedOthers.set(k, (allocatedOthers.get(k) ?? 0) + Number(v))
+        }
       }
+      const cur = (editing?.allocation ?? {}) as Record<string, number>
       return (items ?? []).map((it) => {
         const key = (it.fee_structure_id as string) ?? `desc:${it.description}`
         const billed = Number(it.amount)
-        return { key, label: it.description as string, billed, remaining: Math.max(0, billed - (allocated.get(key) ?? 0)) }
+        return {
+          key,
+          label: it.description as string,
+          billed,
+          capacity: Math.max(0, billed - (allocatedOthers.get(key) ?? 0)),
+          overallRemaining: Math.max(0, billed - (allocatedAll.get(key) ?? 0)),
+          current: Number(cur[key] ?? 0),
+        }
       })
     },
   })
 
-  // Default each fee's input to its outstanding amount, once loaded.
+  // Default each fee's input: to this payment's current split when editing, else
+  // to how much of that fee is still available to pay.
   useEffect(() => {
     if (fees && !initDone) {
       const init: Record<string, string> = {}
-      for (const f of fees) init[f.key] = f.remaining > 0 ? String(f.remaining) : ''
+      for (const f of fees) init[f.key] = isEdit ? (f.current > 0 ? String(f.current) : '') : f.capacity > 0 ? String(f.capacity) : ''
       setInputs(init)
       setInitDone(true)
     }
-  }, [fees, initDone])
+  }, [fees, initDone, isEdit])
 
   const hasFees = (fees?.length ?? 0) > 0
   const total = hasFees
     ? (fees ?? []).reduce((s, f) => s + (Number(inputs[f.key]) || 0), 0)
     : Number(inputs.__single ?? '') || 0
+
+  // Never let an entry exceed the amount available for that fee.
+  const clampNum = (v: string, max: number) => {
+    if (v === '') return ''
+    const n = Number(v)
+    if (Number.isNaN(n)) return ''
+    return String(Math.max(0, Math.min(max, Math.round(n * 100) / 100)))
+  }
 
   const save = useMutation({
     mutationFn: async () => {
@@ -970,6 +1078,20 @@ function PaymentDialog({
           const v = Number(inputs[f.key]) || 0
           if (v > 0) allocation[f.key] = v
         }
+      }
+      if (isEdit) {
+        const { error } = await supabase
+          .from('payments')
+          .update({
+            amount: total,
+            bank_name: bank.trim() || null,
+            teller_no: teller.trim() || null,
+            reference: reference.trim() || null,
+            allocation: (hasFees ? allocation : null) as never,
+          })
+          .eq('id', editing!.id)
+        if (error) throw error
+        return 'synced' as const
       }
       const row_ = {
         id: crypto.randomUUID(),
@@ -991,7 +1113,7 @@ function PaymentDialog({
       if (result === 'queued') setQueued(true)
       else onSaved()
     },
-    onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Could not record payment.'),
+    onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Could not save payment.'),
   })
 
   if (queued) {
@@ -1026,13 +1148,13 @@ function PaymentDialog({
     <Dialog
       open
       onClose={onClose}
-      title="Record payment"
+      title={isEdit ? 'Edit payment' : 'Record payment'}
       description={`${row.name} · balance ${formatMoney(balance, currency)}`}
       footer={
         <>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button onClick={() => save.mutate()} loading={save.isPending} disabled={total <= 0}>
-            Record {formatMoney(total, currency)}
+            {isEdit ? 'Save' : 'Record'} {formatMoney(total, currency)}
           </Button>
         </>
       }
@@ -1043,8 +1165,8 @@ function PaymentDialog({
             <p className="mb-1.5 text-sm font-medium text-foreground">Amount paid — by fee</p>
             <div className="rounded-md border border-border">
               {(fees ?? []).map((f) => {
-                const paidFully = f.remaining <= 0
-                const partPaid = f.remaining > 0 && f.remaining < f.billed
+                const paidFully = f.overallRemaining <= 0
+                const partPaid = f.overallRemaining > 0 && f.overallRemaining < f.billed
                 return (
                   <div key={f.key} className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-0">
                     <div className="min-w-0 flex-1">
@@ -1058,16 +1180,17 @@ function PaymentDialog({
                       <p className={cn('text-xs', paidFully ? 'text-success' : 'text-muted')}>
                         {paidFully
                           ? `Paid in full · ${formatMoney(f.billed, currency)}`
-                          : `Outstanding ${formatMoney(f.remaining, currency)} of ${formatMoney(f.billed, currency)}`}
+                          : `Outstanding ${formatMoney(f.overallRemaining, currency)} of ${formatMoney(f.billed, currency)}`}
                       </p>
                     </div>
                     <Input
                       type="number"
                       min={0}
-                      disabled={paidFully}
+                      max={f.capacity}
+                      disabled={f.capacity <= 0}
                       className="w-28 text-right tabular-nums disabled:opacity-50"
                       value={inputs[f.key] ?? ''}
-                      onChange={(e) => setInputs((m) => ({ ...m, [f.key]: e.target.value }))}
+                      onChange={(e) => setInputs((m) => ({ ...m, [f.key]: clampNum(e.target.value, f.capacity) }))}
                     />
                   </div>
                 )
@@ -1095,27 +1218,29 @@ function PaymentDialog({
         <Field label="Note / reference" htmlFor="p-ref">
           <Input id="p-ref" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="e.g. paid at branch" />
         </Field>
-        <div>
-          <p className="mb-1.5 text-sm font-medium text-foreground">Receipt</p>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/png,image/jpeg,image/webp,application/pdf"
-            className="hidden"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          />
-          <div className="flex items-center gap-3">
-            <Button type="button" variant="outline" size="sm" onClick={() => fileRef.current?.click()}>
-              <FileUp className="h-4 w-4" /> {file ? 'Change file' : 'Upload receipt'}
-            </Button>
-            {file && (
-              <span className="flex items-center gap-1 text-sm text-success">
-                <Check className="h-4 w-4" /> {file.name}
-              </span>
-            )}
+        {!isEdit && (
+          <div>
+            <p className="mb-1.5 text-sm font-medium text-foreground">Receipt</p>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,application/pdf"
+              className="hidden"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
+            <div className="flex items-center gap-3">
+              <Button type="button" variant="outline" size="sm" onClick={() => fileRef.current?.click()}>
+                <FileUp className="h-4 w-4" /> {file ? 'Change file' : 'Upload receipt'}
+              </Button>
+              {file && (
+                <span className="flex items-center gap-1 text-sm text-success">
+                  <Check className="h-4 w-4" /> {file.name}
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-xs text-muted">Photo or PDF of the bank teller · up to 5&nbsp;MB</p>
           </div>
-          <p className="mt-1 text-xs text-muted">Photo or PDF of the bank teller · up to 5&nbsp;MB</p>
-        </div>
+        )}
         {error && <p className="text-sm text-danger">{error}</p>}
       </div>
     </Dialog>
@@ -1157,5 +1282,14 @@ function StatusPill({ status }: { status: string }) {
     none: 'bg-muted-surface text-faint',
   }
   const label: Record<string, string> = { paid: 'Paid', part_paid: 'Part-paid', issued: 'Unpaid', none: 'No invoice' }
-  return <span className={cn('rounded-full px-2.5 py-0.5 text-xs font-medium', map[status] ?? map.none)}>{label[status] ?? status}</span>
+  return (
+    <span
+      className={cn(
+        'inline-flex min-w-[5.5rem] items-center justify-center whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium',
+        map[status] ?? map.none,
+      )}
+    >
+      {label[status] ?? status}
+    </span>
+  )
 }
