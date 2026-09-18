@@ -995,6 +995,8 @@ export type Database = {
         Row: {
           amount: number
           allocation: Json | null
+          collected_session_id: string | null
+          collected_term_id: string | null
           bank_name: string | null
           created_at: string
           id: string
@@ -1011,6 +1013,8 @@ export type Database = {
         Insert: {
           amount: number
           allocation?: Json | null
+          collected_session_id?: string | null
+          collected_term_id?: string | null
           bank_name?: string | null
           created_at?: string
           id?: string
@@ -1027,6 +1031,8 @@ export type Database = {
         Update: {
           amount?: number
           allocation?: Json | null
+          collected_session_id?: string | null
+          collected_term_id?: string | null
           bank_name?: string | null
           created_at?: string
           id?: string

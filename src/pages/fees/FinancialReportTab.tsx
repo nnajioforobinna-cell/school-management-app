@@ -17,9 +17,11 @@ interface Line {
 }
 interface ReportData {
   fees: Line[]
+  arrears: Line[]
   otherIncome: Line[]
   expenses: Line[]
   totalFees: number
+  totalArrears: number
   totalOther: number
   totalIncome: number
   totalExpense: number
@@ -58,41 +60,48 @@ export function FinancialReportTab() {
     queryKey: ['financial_report', schoolId, sessionId, termId],
     enabled: !!sessionId,
     queryFn: async (): Promise<ReportData> => {
-      // --- Fee income: sum the ACTUAL amount each payment allocated to each fee
-      //     structure (no proportional guessing). ---
-      let invQuery = supabase
-        .from('invoices')
-        .select('id, invoice_items(fee_structure_id, description, amount)')
+      // --- Fee income (CASH BASIS): payments COLLECTED in this period, split
+      //     into current-period fees and arrears recovered from earlier periods. ---
+      let payQ = supabase
+        .from('payments')
+        .select('amount, allocation, invoices(session_id, term_id, academic_sessions(name), terms(name))')
         .eq('school_id', schoolId)
-        .eq('session_id', sessionId)
-      if (termId) invQuery = invQuery.eq('term_id', termId)
-      const { data: invoices } = await invQuery
-
-      const invoiceIds = (invoices ?? []).map((i) => i.id as string)
-      const keyLabel = new Map<string, string>()
-      for (const inv of invoices ?? []) {
-        const items = (inv.invoice_items as unknown as { fee_structure_id: string | null; description: string }[]) ?? []
-        for (const it of items) keyLabel.set(it.fee_structure_id ?? `desc:${it.description}`, it.description)
-      }
+        .eq('collected_session_id', sessionId)
+      if (termId) payQ = payQ.eq('collected_term_id', termId)
+      const [{ data: pays }, { data: feeStructs }] = await Promise.all([
+        payQ,
+        supabase.from('fee_structures').select('id, name').eq('school_id', schoolId),
+      ])
+      const feeName = new Map((feeStructs ?? []).map((f) => [f.id as string, f.name as string]))
+      const labelForKey = (k: string) => feeName.get(k) ?? (k.startsWith('desc:') ? k.slice(5) : 'Fees')
 
       const feeMap = new Map<string, number>()
-      let unallocated = 0
-      if (invoiceIds.length) {
-        const { data: pays } = await supabase.from('payments').select('amount, allocation').in('invoice_id', invoiceIds)
-        for (const p of pays ?? []) {
-          const a = (p.allocation ?? null) as Record<string, number> | null
-          if (a && Object.keys(a).length) {
-            for (const [k, v] of Object.entries(a)) feeMap.set(k, (feeMap.get(k) ?? 0) + Number(v))
-          } else {
-            unallocated += Number(p.amount) // legacy payment with no per-fee split
+      const arrearsMap = new Map<string, number>()
+      let unallocatedCurrent = 0
+      let unallocatedArrears = 0
+      for (const p of pays ?? []) {
+        const inv = p.invoices as unknown as { session_id: string; term_id: string | null; academic_sessions: { name: string } | null; terms: { name: string } | null } | null
+        const isCurrent = termId ? inv?.session_id === sessionId && inv?.term_id === termId : inv?.session_id === sessionId
+        const periodLabel = `${inv?.academic_sessions?.name ?? ''} ${TERM_LABEL[inv?.terms?.name ?? ''] ?? inv?.terms?.name ?? ''}`.trim()
+        const a = (p.allocation ?? null) as Record<string, number> | null
+        if (a && Object.keys(a).length) {
+          for (const [k, v] of Object.entries(a)) {
+            if (isCurrent) feeMap.set(labelForKey(k), (feeMap.get(labelForKey(k)) ?? 0) + Number(v))
+            else {
+              const label = `${labelForKey(k)} (${periodLabel})`
+              arrearsMap.set(label, (arrearsMap.get(label) ?? 0) + Number(v))
+            }
           }
+        } else if (isCurrent) {
+          unallocatedCurrent += Number(p.amount)
+        } else {
+          unallocatedArrears += Number(p.amount)
         }
       }
-      const fees: Line[] = [...feeMap.entries()]
-        .map(([key, amount]) => ({ label: keyLabel.get(key) ?? 'Fees', amount }))
-        .filter((l) => l.amount > 0)
-        .sort((a, b) => b.amount - a.amount)
-      if (unallocated > 0) fees.push({ label: 'Fees (unallocated)', amount: unallocated })
+      const fees: Line[] = [...feeMap.entries()].map(([label, amount]) => ({ label, amount })).filter((l) => l.amount > 0).sort((a, b) => b.amount - a.amount)
+      if (unallocatedCurrent > 0) fees.push({ label: 'Fees (unallocated)', amount: unallocatedCurrent })
+      const arrears: Line[] = [...arrearsMap.entries()].map(([label, amount]) => ({ label, amount })).filter((l) => l.amount > 0).sort((a, b) => b.amount - a.amount)
+      if (unallocatedArrears > 0) arrears.push({ label: 'Arrears recovered (unallocated)', amount: unallocatedArrears })
 
       // --- Ledger income & expenses by category ---
       let ledQuery = supabase
@@ -118,10 +127,11 @@ export function FinancialReportTab() {
       const expenses: Line[] = [...expMap.entries()].map(([label, amount]) => ({ label, amount })).sort((a, b) => b.amount - a.amount)
 
       const totalFees = fees.reduce((s, l) => s + l.amount, 0)
+      const totalArrears = arrears.reduce((s, l) => s + l.amount, 0)
       const totalOther = otherIncome.reduce((s, l) => s + l.amount, 0)
-      const totalIncome = totalFees + totalOther
+      const totalIncome = totalFees + totalArrears + totalOther
       const totalExpense = expenses.reduce((s, l) => s + l.amount, 0)
-      return { fees, otherIncome, expenses, totalFees, totalOther, totalIncome, totalExpense, net: totalIncome - totalExpense }
+      return { fees, arrears, otherIncome, expenses, totalFees, totalArrears, totalOther, totalIncome, totalExpense, net: totalIncome - totalExpense }
     },
   })
 
@@ -138,6 +148,7 @@ export function FinancialReportTab() {
     const rows: Record<string, unknown>[] = []
     rows.push({ item: 'INCOME', amount: '' })
     for (const l of report.fees) rows.push({ item: `  ${l.label} (fees)`, amount: money(l.amount) })
+    for (const l of report.arrears) rows.push({ item: `  Arrears recovered — ${l.label}`, amount: money(l.amount) })
     for (const l of report.otherIncome) rows.push({ item: `  ${l.label}`, amount: money(l.amount) })
     rows.push({ item: 'Total income', amount: money(report.totalIncome) })
     rows.push({ item: '', amount: '' })
@@ -195,11 +206,13 @@ export function FinancialReportTab() {
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Section title="Income" total={report.totalIncome} tone="text-success" currency={currency}>
-              {report.fees.length > 0 && <SubHeader label="Fees collected" />}
+              {report.fees.length > 0 && <SubHeader label="Fees collected (this period)" />}
               {report.fees.map((l) => <Row key={`f-${l.label}`} label={l.label} amount={l.amount} currency={currency} />)}
+              {report.arrears.length > 0 && <SubHeader label="Arrears recovered (earlier periods)" />}
+              {report.arrears.map((l) => <Row key={`a-${l.label}`} label={l.label} amount={l.amount} currency={currency} />)}
               {report.otherIncome.length > 0 && <SubHeader label="Other income" />}
               {report.otherIncome.map((l) => <Row key={`i-${l.label}`} label={l.label} amount={l.amount} currency={currency} />)}
-              {report.fees.length === 0 && report.otherIncome.length === 0 && <Empty />}
+              {report.fees.length === 0 && report.arrears.length === 0 && report.otherIncome.length === 0 && <Empty />}
             </Section>
 
             <Section title="Expenses" total={report.totalExpense} tone="text-danger" currency={currency}>

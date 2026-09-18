@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Search } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useSchool } from '@/providers/SchoolProvider'
@@ -7,9 +7,23 @@ import { docHeaderHtml, printHtml, tableHtml, type Column } from '@/lib/print'
 import { exportSheets } from '@/lib/excel'
 import { formatMoney, cn } from '@/lib/utils'
 import { Card, CardBody } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import { Dialog } from '@/components/ui/dialog'
 import { ExportButtons } from '@/components/ExportButtons'
+import { PaymentDialog, type PayableInvoice } from '@/pages/fees/PaymentDialog'
+
+const TERM_ORDER: Record<string, number> = { first: 1, second: 2, third: 3 }
+
+interface DebtorInvoice {
+  invoiceId: string
+  termId: string
+  termName: string
+  total: number
+  paid: number
+  outstanding: number
+}
 
 const TERM_LABEL: Record<string, string> = { first: 'First Term', second: 'Second Term', third: 'Third Term' }
 
@@ -28,6 +42,7 @@ interface Debtor {
   admissionNo: string | null
   className: string
   outstanding: number
+  invoices: DebtorInvoice[]
 }
 interface FeeRow {
   label: string
@@ -47,9 +62,37 @@ export function OutstandingTab() {
   const schoolId = activeSchool!.id
   const currency = activeSchool!.currency
 
+  const qc = useQueryClient()
   const [sessionId, setSessionId] = useState('')
   const [termId, setTermId] = useState('')
   const [search, setSearch] = useState('')
+  const [payInvoice, setPayInvoice] = useState<PayableInvoice | null>(null)
+  const [pickDebtor, setPickDebtor] = useState<Debtor | null>(null)
+
+  // The period a collection made here belongs to (the actual current term).
+  const { data: currentPeriod } = useQuery({
+    queryKey: ['current_period', schoolId],
+    queryFn: async () => {
+      const { data: s } = await supabase.from('academic_sessions').select('id').eq('school_id', schoolId).eq('is_current', true).maybeSingle()
+      if (!s) return { sessionId: null as string | null, termId: null as string | null }
+      const { data: t } = await supabase.from('terms').select('id').eq('session_id', s.id as string).eq('is_current', true).maybeSingle()
+      return { sessionId: s.id as string, termId: (t?.id as string) ?? null }
+    },
+  })
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['outstanding'] })
+    qc.invalidateQueries({ queryKey: ['pay_fees'] })
+    qc.invalidateQueries({ queryKey: ['invoice_rows'] })
+  }
+  const startPay = (d: Debtor) => {
+    if (d.invoices.length <= 1) {
+      const inv = d.invoices[0]
+      if (inv) setPayInvoice({ invoiceId: inv.invoiceId, name: d.name, total: inv.total, paid: inv.paid })
+    } else {
+      setPickDebtor(d)
+    }
+  }
 
   const { data: sessions } = useQuery({
     queryKey: ['academic_sessions', schoolId],
@@ -75,10 +118,23 @@ export function OutstandingTab() {
     queryKey: ['outstanding', schoolId, sessionId, termId],
     enabled: !!sessionId,
     queryFn: async (): Promise<Report> => {
-      let invQ = supabase.from('invoices').select('id, student_id, total, amount_paid').eq('school_id', schoolId).eq('session_id', sessionId)
+      let invQ = supabase.from('invoices').select('id, student_id, term_id, total, amount_paid, terms(name)').eq('school_id', schoolId).eq('session_id', sessionId)
       if (termId) invQ = invQ.eq('term_id', termId)
       const { data: invoices } = await invQ
       const invIds = (invoices ?? []).map((i) => i.id as string)
+
+      // Unpaid invoices per student, so a debt can be settled from here.
+      const invByStudent = new Map<string, DebtorInvoice[]>()
+      for (const i of invoices ?? []) {
+        const total = Number(i.total)
+        const paid = Number(i.amount_paid)
+        const out = Math.max(0, total - paid)
+        if (out <= 0) continue
+        const trm = i.terms as unknown as { name: string } | null
+        const arr = invByStudent.get(i.student_id as string) ?? []
+        arr.push({ invoiceId: i.id as string, termId: (i.term_id as string) ?? '', termName: trm?.name ?? '', total, paid, outstanding: out })
+        invByStudent.set(i.student_id as string, arr)
+      }
       const studentIds = [...new Set((invoices ?? []).map((i) => i.student_id as string))]
 
       // Class + name for each student, from the session's enrolment.
@@ -161,7 +217,8 @@ export function OutstandingTab() {
         .filter(([, out]) => out > 0)
         .map(([studentId, out]) => {
           const info = studentInfo.get(studentId)
-          return { studentId, name: info?.name ?? '', admissionNo: info?.adm ?? null, className: info?.className ?? '', outstanding: out }
+          const invs = (invByStudent.get(studentId) ?? []).sort((a, b) => (TERM_ORDER[a.termName] ?? 0) - (TERM_ORDER[b.termName] ?? 0))
+          return { studentId, name: info?.name ?? '', admissionNo: info?.adm ?? null, className: info?.className ?? '', outstanding: out, invoices: invs }
         })
         .sort((a, b) => b.outstanding - a.outstanding)
 
@@ -348,6 +405,7 @@ export function OutstandingTab() {
                       <th className="px-5 py-3 font-medium">Student</th>
                       <th className="px-4 py-3 font-medium">Class</th>
                       <th className="px-4 py-3 text-right font-medium">Outstanding</th>
+                      <th className="px-4 py-3" />
                     </tr>
                   </thead>
                   <tbody>
@@ -359,6 +417,11 @@ export function OutstandingTab() {
                         </td>
                         <td className="px-4 py-2.5 text-muted">{d.className}</td>
                         <td className="px-4 py-2.5 text-right font-medium tabular-nums text-danger">{formatMoney(d.outstanding, currency)}</td>
+                        <td className="px-4 py-2.5 text-right">
+                          <Button variant="outline" size="sm" className="whitespace-nowrap px-4" onClick={() => startPay(d)}>
+                            Record payment
+                          </Button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -367,6 +430,49 @@ export function OutstandingTab() {
             )}
           </Card>
         </>
+      )}
+
+      {/* Choose which term's debt to settle when a student owes several. */}
+      {pickDebtor && (
+        <Dialog
+          open
+          onClose={() => setPickDebtor(null)}
+          title={`Which term to settle — ${pickDebtor.name}`}
+          description="This student owes for more than one term. Pick the one you're collecting."
+          footer={<Button variant="outline" onClick={() => setPickDebtor(null)}>Cancel</Button>}
+        >
+          <ul className="flex flex-col gap-2">
+            {pickDebtor.invoices.map((inv) => (
+              <li key={inv.invoiceId}>
+                <button
+                  onClick={() => {
+                    setPayInvoice({ invoiceId: inv.invoiceId, name: pickDebtor.name, total: inv.total, paid: inv.paid })
+                    setPickDebtor(null)
+                  }}
+                  className="flex w-full items-center justify-between rounded-md border border-border px-4 py-3 text-left hover:bg-muted-surface"
+                >
+                  <span className="font-medium text-foreground">{TERM_LABEL[inv.termName] ?? inv.termName ?? 'Term'}</span>
+                  <span className="font-medium tabular-nums text-danger">{formatMoney(inv.outstanding, currency)}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Dialog>
+      )}
+
+      {payInvoice && (
+        <PaymentDialog
+          schoolId={schoolId}
+          currency={currency}
+          invoice={payInvoice}
+          collectedSessionId={currentPeriod?.sessionId ?? null}
+          collectedTermId={currentPeriod?.termId ?? null}
+          onClose={() => setPayInvoice(null)}
+          onSaved={() => {
+            setPayInvoice(null)
+            refresh()
+          }}
+        />
       )}
     </div>
   )
