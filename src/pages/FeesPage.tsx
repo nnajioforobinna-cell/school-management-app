@@ -1042,21 +1042,36 @@ function PaymentDialog({
           <div>
             <p className="mb-1.5 text-sm font-medium text-foreground">Amount paid — by fee</p>
             <div className="rounded-md border border-border">
-              {(fees ?? []).map((f) => (
-                <div key={f.key} className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-0">
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm text-foreground">{f.label}</p>
-                    <p className="text-xs text-muted">Outstanding {formatMoney(f.remaining, currency)}</p>
+              {(fees ?? []).map((f) => {
+                const paidFully = f.remaining <= 0
+                const partPaid = f.remaining > 0 && f.remaining < f.billed
+                return (
+                  <div key={f.key} className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-0">
+                    <div className="min-w-0 flex-1">
+                      <p className="flex items-center gap-1.5 truncate text-sm text-foreground">
+                        {paidFully && <Check className="h-4 w-4 shrink-0 text-success" />}
+                        {f.label}
+                        {partPaid && (
+                          <span className="rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium uppercase text-warning">Part</span>
+                        )}
+                      </p>
+                      <p className={cn('text-xs', paidFully ? 'text-success' : 'text-muted')}>
+                        {paidFully
+                          ? `Paid in full · ${formatMoney(f.billed, currency)}`
+                          : `Outstanding ${formatMoney(f.remaining, currency)} of ${formatMoney(f.billed, currency)}`}
+                      </p>
+                    </div>
+                    <Input
+                      type="number"
+                      min={0}
+                      disabled={paidFully}
+                      className="w-28 text-right tabular-nums disabled:opacity-50"
+                      value={inputs[f.key] ?? ''}
+                      onChange={(e) => setInputs((m) => ({ ...m, [f.key]: e.target.value }))}
+                    />
                   </div>
-                  <Input
-                    type="number"
-                    min={0}
-                    className="w-28 text-right tabular-nums"
-                    value={inputs[f.key] ?? ''}
-                    onChange={(e) => setInputs((m) => ({ ...m, [f.key]: e.target.value }))}
-                  />
-                </div>
-              ))}
+                )
+              })}
               <div className="flex items-center justify-between bg-muted-surface px-3 py-2">
                 <span className="text-sm font-medium text-foreground">Total</span>
                 <span className="font-semibold tabular-nums text-foreground">{formatMoney(total, currency)}</span>
