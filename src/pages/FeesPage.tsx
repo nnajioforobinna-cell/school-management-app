@@ -13,6 +13,7 @@ import { formatDate, formatMoney } from '@/lib/utils'
 import { PageHeader } from '@/components/PageHeader'
 import { LedgerTab } from '@/pages/fees/LedgerTab'
 import { FinancialReportTab } from '@/pages/fees/FinancialReportTab'
+import { OutstandingTab } from '@/pages/fees/OutstandingTab'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -30,6 +31,7 @@ const TABS = [
   { id: 'structure', label: 'Fee structure' },
   { id: 'ledger', label: 'Accounts ledger' },
   { id: 'report', label: 'Financial report' },
+  { id: 'outstanding', label: 'Outstanding fees' },
 ] as const
 type TabId = (typeof TABS)[number]['id']
 
@@ -61,6 +63,7 @@ export function FeesPage() {
       {activeSchool && tab === 'structure' && <FeeStructureTab />}
       {activeSchool && tab === 'ledger' && <LedgerTab />}
       {activeSchool && tab === 'report' && <FinancialReportTab />}
+      {activeSchool && tab === 'outstanding' && <OutstandingTab />}
     </div>
   )
 }
