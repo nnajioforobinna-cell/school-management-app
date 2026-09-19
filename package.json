@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",
@@ -15,6 +18,7 @@
     "@tanstack/query-async-storage-persister": "^5.102.8",
     "@tanstack/react-query": "^5.56.2",
     "@tanstack/react-query-persist-client": "^5.102.8",
+    "@tauri-apps/api": "^2.11.1",
     "clsx": "^2.1.1",
     "html2canvas": "^1.4.1",
     "idb-keyval": "^6.3.0",
@@ -30,6 +34,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^20.16.5",
     "@types/react": "^18.3.8",
     "@types/react-dom": "^18.3.0",
