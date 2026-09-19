@@ -63,6 +63,7 @@ jobs:
         with:
           name: installers-${{ matrix.platform }}
           if-no-files-found: warn
+          overwrite: true
           path: |
             src-tauri/target/**/release/bundle/**/*.dmg
             src-tauri/target/**/release/bundle/**/*.exe
