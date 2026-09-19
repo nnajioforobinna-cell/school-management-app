@@ -129,7 +129,7 @@ export function ReportCard({
             )}
           </>
         )}
-        <Button className="ml-auto" onClick={() => sheetRef.current && printNode(sheetRef.current, 'Report Card')}>
+        <Button className="ml-auto" onClick={() => sheetRef.current && printNode(sheetRef.current, 'Report Card', { fit: true })}>
           <Printer className="h-4 w-4" /> Print / Save PDF
         </Button>
       </div>

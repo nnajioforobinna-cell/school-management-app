@@ -257,6 +257,8 @@ interface PdfOptions {
   preferDownload: boolean
   format: string
   orientation: PdfOrientation
+  /** Scale the whole render down to a single page (e.g. a report card). */
+  fitOnePage?: boolean
 }
 
 async function renderToPdf(build: (root: HTMLElement) => void, filename: string, title: string, opts: PdfOptions) {
@@ -274,7 +276,7 @@ async function renderToPdf(build: (root: HTMLElement) => void, filename: string,
   document.body.appendChild(root)
 
   try {
-    const blob = await elementToPdfBlob(root, opts.format, opts.orientation)
+    const blob = await elementToPdfBlob(root, opts.format, opts.orientation, opts.fitOnePage ?? false)
     const preferDownload = opts.preferDownload
     const file = new File([blob], `${filename}.pdf`, { type: 'application/pdf' })
     // Desktop (Tauri): save the file. Mobile PWA: hand it to the OS Share sheet.
@@ -299,7 +301,12 @@ async function renderToPdf(build: (root: HTMLElement) => void, filename: string,
  * Render a DOM element to a multi-page A4 PDF using html2canvas + jsPDF
  * directly. (html2pdf.js's own jsPDF glue produced blank pages in this bundle.)
  */
-async function elementToPdfBlob(root: HTMLElement, format: string, orientation: PdfOrientation): Promise<Blob> {
+async function elementToPdfBlob(
+  root: HTMLElement,
+  format: string,
+  orientation: PdfOrientation,
+  fitOnePage = false,
+): Promise<Blob> {
   const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
     import('html2canvas'),
     import('jspdf'),
@@ -328,6 +335,21 @@ async function elementToPdfBlob(root: HTMLElement, format: string, orientation: 
   const margin = 8
   const usableW = pageW - margin * 2
   const usableH = pageH - margin * 2
+
+  // Fit-to-one-page: scale the whole render down so it never spills over.
+  if (fitOnePage) {
+    const naturalHmm = (canvas.height / canvas.width) * usableW
+    let drawW = usableW
+    let drawH = naturalHmm
+    if (naturalHmm > usableH) {
+      drawW = usableW * (usableH / naturalHmm)
+      drawH = usableH
+    }
+    const img = canvas.toDataURL('image/jpeg', 0.95)
+    pdf.addImage(img, 'JPEG', margin + (usableW - drawW) / 2, margin, drawW, drawH)
+    return pdf.output('blob')
+  }
+
   const pxPerMm = canvas.width / usableW
   const pageHpx = usableH * pxPerMm // one page's worth of content, in canvas px
 
@@ -446,7 +468,8 @@ ${foot}
  * rendered to a shareable PDF (the clone keeps the app's styles since it stays
  * in the same document).
  */
-export function printNode(el: HTMLElement, title: string) {
+export function printNode(el: HTMLElement, title: string, opts: { fit?: boolean } = {}) {
+  const fit = opts.fit ?? false
   const buildClone = (root: HTMLElement) => {
     const clone = el.cloneNode(true) as HTMLElement
     clone.style.boxShadow = 'none'
@@ -457,27 +480,49 @@ export function printNode(el: HTMLElement, title: string) {
   }
   if (isTauri()) {
     void (async () => {
-      const opts = await askPdfOptions()
-      if (opts) renderToPdf(buildClone, slug(title), title, { preferDownload: true, ...opts })
+      const o = await askPdfOptions()
+      if (o) renderToPdf(buildClone, slug(title), title, { preferDownload: true, ...o, fitOnePage: fit })
     })()
     return
   }
   if (canShareFiles()) {
-    void renderToPdf(buildClone, slug(title), title, { preferDownload: false, format: 'a4', orientation: 'portrait' })
+    void renderToPdf(buildClone, slug(title), title, {
+      preferDownload: false,
+      format: 'a4',
+      orientation: 'portrait',
+      fitOnePage: fit,
+    })
     return
   }
 
   const styles = Array.from(document.querySelectorAll('link[rel="stylesheet"], style'))
     .map((n) => n.outerHTML)
     .join('\n')
+  // When fitting to one page, scale the content down (after fonts/images load)
+  // so the browser's print dialog also produces a single page.
+  const fitStyle = fit ? '#fit-wrap { transform-origin: top left; }' : ''
+  const fitScript = fit
+    ? `<script>(function(){
+        var mm=96/25.4, pageW=(210-24)*mm, pageH=(297-24)*mm;
+        function fit(){
+          var w=document.getElementById('fit-wrap'); if(!w) return;
+          w.style.transform='none';
+          var s=Math.min(pageW/w.scrollWidth, pageH/w.scrollHeight, 1);
+          w.style.transform='scale('+s+')';
+        }
+        window.addEventListener('load', function(){ fit(); setTimeout(fit, 300); });
+        if(document.fonts&&document.fonts.ready){ document.fonts.ready.then(fit); }
+      })();</script>`
+    : ''
+  const bodyInner = fit ? `<div id="fit-wrap">${el.outerHTML}</div>` : el.outerHTML
   printViaIframe(`<!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
 <title>${escapeHtml(title)}</title>
 ${styles}
-<style>@page { margin: 12mm; } html,body { margin: 0; background: #fff; }</style>
+<style>@page { margin: 12mm; } html,body { margin: 0; background: #fff; } ${fitStyle}</style>
 </head>
-<body>${el.outerHTML}</body>
+<body>${bodyInner}${fitScript}</body>
 </html>`)
 }
