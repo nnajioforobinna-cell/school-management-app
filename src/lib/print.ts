@@ -109,7 +109,16 @@ function isStandalone(): boolean {
 
 /** Web Share (with files) is the only way to Print / Save-to-Files in an iOS PWA. */
 function canShareFiles(): boolean {
-  return isStandalone() && typeof navigator.share === 'function' && typeof navigator.canShare === 'function'
+  return !isTauri() && isStandalone() && typeof navigator.share === 'function' && typeof navigator.canShare === 'function'
+}
+
+/** True inside the Tauri desktop app (its webview has no working window.print()). */
+function isTauri(): boolean {
+  try {
+    return '__TAURI_INTERNALS__' in window || '__TAURI__' in window
+  } catch {
+    return false
+  }
 }
 
 function slug(title: string): string {
@@ -159,7 +168,7 @@ function printViaIframe(html: string) {
 /* ------------------------------------------------------------------ */
 /* PWA path — render to PDF and open the OS Share sheet                 */
 /* ------------------------------------------------------------------ */
-async function shareAsPdf(build: (root: HTMLElement) => void, filename: string, title: string) {
+async function renderToPdf(build: (root: HTMLElement) => void, filename: string, title: string, preferDownload: boolean) {
   const style = document.createElement('style')
   style.textContent = scopedCss('#pdf-root')
   document.head.appendChild(style)
@@ -174,17 +183,16 @@ async function shareAsPdf(build: (root: HTMLElement) => void, filename: string, 
 
   try {
     const blob = await elementToPdfBlob(root)
-
     const file = new File([blob], `${filename}.pdf`, { type: 'application/pdf' })
-    try {
-      if (navigator.canShare?.({ files: [file] })) {
+    // Desktop (Tauri): save the file. Mobile PWA: hand it to the OS Share sheet.
+    if (!preferDownload && navigator.canShare?.({ files: [file] })) {
+      try {
         await navigator.share({ files: [file], title })
-      } else {
-        downloadBlob(blob, `${filename}.pdf`)
+      } catch (err) {
+        if ((err as Error)?.name !== 'AbortError') downloadBlob(blob, `${filename}.pdf`)
       }
-    } catch (err) {
-      // User cancelled the share sheet — nothing to do.
-      if ((err as Error)?.name !== 'AbortError') downloadBlob(blob, `${filename}.pdf`)
+    } else {
+      downloadBlob(blob, `${filename}.pdf`)
     }
   } catch {
     alert('Could not prepare the PDF. Please try again.')
@@ -305,10 +313,12 @@ function scopedCss(scope: string): string {
 export function printHtml(title: string, bodyHtml: string) {
   const foot = `<div class="foot"><span>Generated ${escapeHtml(new Date().toLocaleString())}</span><span>School Platform</span></div>`
 
-  if (canShareFiles()) {
-    void shareAsPdf((root) => {
+  // Tauri desktop: window.print() is a no-op, so render + save a PDF file.
+  // iOS PWA: render + share. Everything else: the browser print dialog.
+  if (isTauri() || canShareFiles()) {
+    void renderToPdf((root) => {
       root.innerHTML = bodyHtml + foot
-    }, slug(title), title)
+    }, slug(title), title, isTauri())
     return
   }
 
@@ -336,15 +346,15 @@ ${foot}
  * in the same document).
  */
 export function printNode(el: HTMLElement, title: string) {
-  if (canShareFiles()) {
-    void shareAsPdf((root) => {
+  if (isTauri() || canShareFiles()) {
+    void renderToPdf((root) => {
       const clone = el.cloneNode(true) as HTMLElement
       clone.style.boxShadow = 'none'
       clone.style.margin = '0'
       clone.style.maxWidth = '100%'
       root.style.padding = '0'
       root.appendChild(clone)
-    }, slug(title), title)
+    }, slug(title), title, isTauri())
     return
   }
 
