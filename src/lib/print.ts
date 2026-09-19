@@ -121,6 +121,91 @@ function isTauri(): boolean {
   }
 }
 
+type PdfOrientation = 'portrait' | 'landscape'
+
+// Paper sizes in mm [short, long].
+const PAGE_MM: Record<string, [number, number]> = {
+  a4: [210, 297],
+  letter: [215.9, 279.4],
+  legal: [215.9, 355.6],
+  a3: [297, 420],
+}
+const PDF_MARGIN_MM = 8
+
+/** Usable page width in CSS px for a paper size + orientation (for the render container). */
+function pageWidthPx(format: string, orientation: PdfOrientation): number {
+  const [short, long] = PAGE_MM[format] ?? PAGE_MM.a4
+  const widthMm = orientation === 'landscape' ? long : short
+  return Math.round((widthMm - PDF_MARGIN_MM * 2) * (96 / 25.4))
+}
+
+/**
+ * Desktop-only: ask the user for paper size + orientation before saving a PDF,
+ * since the Tauri webview has no native print dialog. A small self-contained
+ * modal (no React) so it works from this library. Resolves null on cancel.
+ */
+function askPdfOptions(): Promise<{ format: string; orientation: PdfOrientation } | null> {
+  return new Promise((resolve) => {
+    let prevFormat = 'a4'
+    let prevOrient: PdfOrientation = 'portrait'
+    try {
+      prevFormat = localStorage.getItem('pdf.format') || 'a4'
+      prevOrient = (localStorage.getItem('pdf.orientation') as PdfOrientation) || 'portrait'
+    } catch {
+      /* ignore */
+    }
+    const overlay = document.createElement('div')
+    overlay.style.cssText =
+      'position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.4)'
+    const selCss =
+      'width:100%;padding:9px 10px;border:1px solid var(--border,#ccc);border-radius:8px;background:var(--surface,#fff);color:inherit;font-size:14px;margin-bottom:14px'
+    overlay.innerHTML = `
+      <div style="background:var(--surface,#fff);color:var(--foreground,#16202a);border:1px solid var(--border,#d5ddd3);border-radius:12px;width:340px;max-width:90vw;padding:22px;font-family:'IBM Plex Sans',system-ui,sans-serif;box-shadow:0 12px 44px rgba(0,0,0,.28)">
+        <h2 style="margin:0 0 4px;font-family:'Spectral',Georgia,serif;font-size:18px;font-weight:600">Save as PDF</h2>
+        <p style="margin:0 0 16px;font-size:13px;color:var(--muted,#586168)">Choose the paper size and orientation.</p>
+        <label style="display:block;font-size:13px;font-weight:500;margin-bottom:5px">Paper size</label>
+        <select id="pdf-format" style="${selCss}">
+          <option value="a4">A4</option>
+          <option value="letter">Letter</option>
+          <option value="legal">Legal</option>
+          <option value="a3">A3</option>
+        </select>
+        <label style="display:block;font-size:13px;font-weight:500;margin-bottom:5px">Orientation</label>
+        <select id="pdf-orient" style="${selCss}">
+          <option value="portrait">Portrait</option>
+          <option value="landscape">Landscape</option>
+        </select>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">
+          <button id="pdf-cancel" style="padding:9px 16px;border:1px solid var(--border,#ccc);border-radius:8px;background:var(--surface,#fff);color:inherit;font-size:14px;cursor:pointer">Cancel</button>
+          <button id="pdf-ok" style="padding:9px 16px;border:0;border-radius:8px;background:var(--primary,#1e5a43);color:#fff;font-size:14px;font-weight:500;cursor:pointer">Save PDF</button>
+        </div>
+      </div>`
+    document.body.appendChild(overlay)
+    const fmt = overlay.querySelector('#pdf-format') as HTMLSelectElement
+    const ori = overlay.querySelector('#pdf-orient') as HTMLSelectElement
+    fmt.value = prevFormat
+    ori.value = prevOrient
+    const close = (val: { format: string; orientation: PdfOrientation } | null) => {
+      overlay.remove()
+      resolve(val)
+    }
+    ;(overlay.querySelector('#pdf-cancel') as HTMLElement).onclick = () => close(null)
+    ;(overlay.querySelector('#pdf-ok') as HTMLElement).onclick = () => {
+      const val = { format: fmt.value, orientation: ori.value as PdfOrientation }
+      try {
+        localStorage.setItem('pdf.format', val.format)
+        localStorage.setItem('pdf.orientation', val.orientation)
+      } catch {
+        /* ignore */
+      }
+      close(val)
+    }
+    overlay.onclick = (e) => {
+      if (e.target === overlay) close(null)
+    }
+  })
+}
+
 function slug(title: string): string {
   return (title || 'document').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'document'
 }
@@ -168,7 +253,13 @@ function printViaIframe(html: string) {
 /* ------------------------------------------------------------------ */
 /* PWA path — render to PDF and open the OS Share sheet                 */
 /* ------------------------------------------------------------------ */
-async function renderToPdf(build: (root: HTMLElement) => void, filename: string, title: string, preferDownload: boolean) {
+interface PdfOptions {
+  preferDownload: boolean
+  format: string
+  orientation: PdfOrientation
+}
+
+async function renderToPdf(build: (root: HTMLElement) => void, filename: string, title: string, opts: PdfOptions) {
   const style = document.createElement('style')
   style.textContent = scopedCss('#pdf-root')
   document.head.appendChild(style)
@@ -177,12 +268,14 @@ async function renderToPdf(build: (root: HTMLElement) => void, filename: string,
   root.id = 'pdf-root'
   // Off-screen but fully opaque — html2canvas copies opacity/visibility into its
   // render, so a hidden (opacity:0/visibility:hidden) container yields a blank PDF.
-  root.style.cssText = 'position:fixed; left:-10000px; top:0; width:794px; background:#ffffff;'
+  // Container width tracks the chosen page so landscape gives wide tables room.
+  root.style.cssText = `position:fixed; left:-10000px; top:0; width:${pageWidthPx(opts.format, opts.orientation)}px; background:#ffffff;`
   build(root)
   document.body.appendChild(root)
 
   try {
-    const blob = await elementToPdfBlob(root)
+    const blob = await elementToPdfBlob(root, opts.format, opts.orientation)
+    const preferDownload = opts.preferDownload
     const file = new File([blob], `${filename}.pdf`, { type: 'application/pdf' })
     // Desktop (Tauri): save the file. Mobile PWA: hand it to the OS Share sheet.
     if (!preferDownload && navigator.canShare?.({ files: [file] })) {
@@ -206,7 +299,7 @@ async function renderToPdf(build: (root: HTMLElement) => void, filename: string,
  * Render a DOM element to a multi-page A4 PDF using html2canvas + jsPDF
  * directly. (html2pdf.js's own jsPDF glue produced blank pages in this bundle.)
  */
-async function elementToPdfBlob(root: HTMLElement): Promise<Blob> {
+async function elementToPdfBlob(root: HTMLElement, format: string, orientation: PdfOrientation): Promise<Blob> {
   const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
     import('html2canvas'),
     import('jspdf'),
@@ -229,7 +322,7 @@ async function elementToPdfBlob(root: HTMLElement): Promise<Blob> {
     .filter((b) => b > 0 && b < canvas.height)
     .sort((a, b) => a - b)
 
-  const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' })
+  const pdf = new jsPDF({ unit: 'mm', format, orientation })
   const pageW = pdf.internal.pageSize.getWidth()
   const pageH = pdf.internal.pageSize.getHeight()
   const margin = 8
@@ -313,12 +406,20 @@ function scopedCss(scope: string): string {
 export function printHtml(title: string, bodyHtml: string) {
   const foot = `<div class="foot"><span>Generated ${escapeHtml(new Date().toLocaleString())}</span><span>School Platform</span></div>`
 
-  // Tauri desktop: window.print() is a no-op, so render + save a PDF file.
-  // iOS PWA: render + share. Everything else: the browser print dialog.
-  if (isTauri() || canShareFiles()) {
-    void renderToPdf((root) => {
-      root.innerHTML = bodyHtml + foot
-    }, slug(title), title, isTauri())
+  const buildBody = (root: HTMLElement) => {
+    root.innerHTML = bodyHtml + foot
+  }
+  // Tauri desktop: window.print() is a no-op — ask paper size/orientation, then
+  // render + save a PDF file. iOS PWA: render + share (A4). Else: print dialog.
+  if (isTauri()) {
+    void (async () => {
+      const opts = await askPdfOptions()
+      if (opts) renderToPdf(buildBody, slug(title), title, { preferDownload: true, ...opts })
+    })()
+    return
+  }
+  if (canShareFiles()) {
+    void renderToPdf(buildBody, slug(title), title, { preferDownload: false, format: 'a4', orientation: 'portrait' })
     return
   }
 
@@ -346,15 +447,23 @@ ${foot}
  * in the same document).
  */
 export function printNode(el: HTMLElement, title: string) {
-  if (isTauri() || canShareFiles()) {
-    void renderToPdf((root) => {
-      const clone = el.cloneNode(true) as HTMLElement
-      clone.style.boxShadow = 'none'
-      clone.style.margin = '0'
-      clone.style.maxWidth = '100%'
-      root.style.padding = '0'
-      root.appendChild(clone)
-    }, slug(title), title, isTauri())
+  const buildClone = (root: HTMLElement) => {
+    const clone = el.cloneNode(true) as HTMLElement
+    clone.style.boxShadow = 'none'
+    clone.style.margin = '0'
+    clone.style.maxWidth = '100%'
+    root.style.padding = '0'
+    root.appendChild(clone)
+  }
+  if (isTauri()) {
+    void (async () => {
+      const opts = await askPdfOptions()
+      if (opts) renderToPdf(buildClone, slug(title), title, { preferDownload: true, ...opts })
+    })()
+    return
+  }
+  if (canShareFiles()) {
+    void renderToPdf(buildClone, slug(title), title, { preferDownload: false, format: 'a4', orientation: 'portrait' })
     return
   }
 
